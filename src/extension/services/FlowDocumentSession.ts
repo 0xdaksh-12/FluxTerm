@@ -1,8 +1,13 @@
 import * as vscode from "vscode";
 import { FlowDocument } from "../../types/MessageProtocol";
-import { defaultDoc } from "../../utils/constant";
+
 import { Ext } from "../../utils/logger";
 import { ShellResolver } from "./ShellResolver";
+import * as path from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
 
 export class FlowDocumentSession {
   private isDisposed = false;
@@ -30,11 +35,26 @@ export class FlowDocumentSession {
         }
 
         switch (message.type) {
-          case "init":
-            this.sendDocument(this.parseDocument(), this.isInitial);
+          case "init": {
+            const doc = this.parseDocument();
+            const cwd = this.getCwd();
+            const branch = await this.getGitBranch(cwd);
+
+            this.panel.webview.postMessage({
+              type: "init",
+              document: doc,
+              context: {
+                cwd: doc.cwd || cwd,
+                branch: doc.branch || branch,
+                connection: "local",
+                shell: doc.shell || null,
+              },
+            });
+
             this.isInitial = false;
             Ext.info("Initialized flow document session");
             break;
+          }
 
           case "update":
             this.enqueue(async () => {
@@ -42,17 +62,6 @@ export class FlowDocumentSession {
             });
             break;
 
-          case "increment":
-            this.enqueue(async () => {
-              const current = this.parseDocument();
-              const updated = {
-                ...current,
-                length: current.length + 1,
-              };
-
-              await this.updateTextDocument(updated);
-              this.sendDocument(updated, false);
-            });
             break;
           case "shellConfig":
             this.enqueue(async () => {
@@ -123,26 +132,17 @@ export class FlowDocumentSession {
     try {
       const text = this.document.getText();
       if (!text.trim()) {
-        return { ...defaultDoc };
+        return {};
       }
       return JSON.parse(text) as FlowDocument;
     } catch {
-      return { ...defaultDoc };
+      return {};
     }
   }
 
   /**
    * Send the document to the webview
    */
-  private sendDocument(doc: FlowDocument, isInitial: boolean) {
-    if (this.isDisposed) {
-      return;
-    }
-    this.panel.webview.postMessage({
-      type: isInitial ? "init" : "update",
-      document: doc,
-    });
-  }
 
   /**
    * Update the text document with the given document
@@ -158,6 +158,24 @@ export class FlowDocumentSession {
 
     edit.replace(this.document.uri, fullRange, json);
     await vscode.workspace.applyEdit(edit);
+  }
+
+  private getCwd(): string {
+    if (this.document.uri.scheme === "file") {
+      return path.dirname(this.document.uri.fsPath);
+    }
+    return this.document.uri.path;
+  }
+
+  private async getGitBranch(cwd: string): Promise<string | null> {
+    try {
+      const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", {
+        cwd,
+      });
+      return stdout.trim();
+    } catch {
+      return null;
+    }
   }
 
   public dispose() {

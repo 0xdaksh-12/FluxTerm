@@ -1,15 +1,12 @@
 import { ShellProfile } from "../types/MessageProtocol";
 
-export const defaultDoc = {
-  length: 0,
-};
-
 export const shell: ShellProfile[] = [
   {
     id: "cmd",
     label: "Command Prompt",
     command: "cmd",
     args: ["/d", "/s", "/c"],
+    icon: "codicon-terminal-cmd",
   },
   {
     id: "powershell",
@@ -23,6 +20,7 @@ export const shell: ShellProfile[] = [
       "-Command",
       "& { $Host.Runspace.ThreadOptions = 'ReuseThread'; $Host.SetShouldExit(0); }",
     ],
+    icon: "codicon-terminal-powershell",
   },
   {
     id: "pwsh",
@@ -36,6 +34,7 @@ export const shell: ShellProfile[] = [
       "-Command",
       "& { $Host.Runspace.ThreadOptions = 'ReuseThread'; $Host.SetShouldExit(0); }",
     ],
+    icon: "codicon-terminal-powershell",
   },
   {
     id: "bash",
@@ -46,11 +45,13 @@ export const shell: ShellProfile[] = [
       "C:\\Windows\\System32\\bash.exe",
       "C:\\Users\\Daksh\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe",
     ],
+    icon: "codicon-terminal-bash",
   },
   {
     id: "zsh",
     label: "Zsh",
     command: "zsh",
     args: ["-c"],
+    icon: "codicon-terminal-bash",
   },
 ];

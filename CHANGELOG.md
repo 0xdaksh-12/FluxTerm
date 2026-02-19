@@ -12,6 +12,9 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - Shell selector dropdown in Webview
 - `pwsh` support in shell configuration
 - `useShellConfig` hook for managing shell selection state
+- `Tooltip` component for enhanced UI feedback
+- CWD path copy functionality via Ctrl+Click
+- Hover effects and tooltips for CWD and shell list items
 
 ### Fixed
 

@@ -1,5 +1,7 @@
 export interface FlowDocument {
-  length: number;
+  shell?: string;
+  cwd?: string;
+  branch?: string;
 }
 
 export type ShellProfile = {
@@ -8,18 +10,28 @@ export type ShellProfile = {
   command: string;
   args: string[];
   ignorePath?: string[];
+  icon?: string;
 };
 
 export type ResolvedShell = {
   id: string;
   label: string;
   path: string;
+  icon?: string;
 };
+
+export interface FlowContext {
+  cwd: string;
+  branch: string | null;
+  shell: string | null;
+  connection: "local" | "remote";
+}
 
 export type ExtMessage =
   | {
       type: "init";
       document: FlowDocument;
+      context: FlowContext;
     }
   | {
       type: "update";
@@ -37,9 +49,6 @@ export type WebviewMessage =
   | {
       type: "update";
       document: FlowDocument;
-    }
-  | {
-      type: "increment";
     }
   | {
       type: "shellConfig";

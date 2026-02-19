@@ -53,10 +53,6 @@ class FlowService {
     this.vscode.postMessage({ type: "update", document });
   }
 
-  public increment() {
-    this.vscode.postMessage({ type: "increment" });
-  }
-
   public getShellConfig() {
     this.vscode.postMessage({ type: "shellConfig" });
   }

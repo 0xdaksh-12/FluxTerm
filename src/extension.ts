@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { defaultDoc } from "./utils/constant";
+
 import { FlowEditorProvider } from "./extension/providers/FlowEditorProvider";
 
 export function activate(context: vscode.ExtensionContext) {
@@ -25,7 +25,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Write default document structure
         await vscode.workspace.fs.writeFile(
           uri,
-          Buffer.from(JSON.stringify(defaultDoc, null, 2)),
+          Buffer.from(JSON.stringify({}, null, 2)),
         );
         // Open with Flow editor
         await vscode.commands.executeCommand(

@@ -1,18 +1,29 @@
 import { useEffect, useState } from "react";
 import { produce } from "immer";
 import { flowService } from "../services/FlowService";
-import { FlowDocument } from "../../types/MessageProtocol";
-import { defaultDoc } from "../../utils/constant";
+import { FlowDocument, FlowContext } from "../../types/MessageProtocol";
 
 export const useFlowDocument = () => {
-  const [document, setDocument] = useState<FlowDocument>(defaultDoc);
+  const [document, setDocument] = useState<FlowDocument>({});
+  const [context, setContext] = useState<FlowContext>({
+    cwd: "",
+    branch: null,
+    shell: null,
+    connection: "local",
+  });
 
   useEffect(() => {
     // Subscribe to messages
     const unsubscribe = flowService.subscribe((message: any) => {
       // Handle messages from extension
-      if (message.type === "init" || message.type === "update") {
+      if (message.type === "init") {
         setDocument(message.document);
+        setContext(message.context);
+      } else if (message.type === "update") {
+        setDocument(message.document);
+        if (message.context) {
+          setContext(message.context);
+        }
       }
     });
 
@@ -37,16 +48,9 @@ export const useFlowDocument = () => {
     flowService.update(nextState);
   };
 
-  /**
-   * Specifically trigger the increment (plus one) event on the extension
-   */
-  const increment = () => {
-    flowService.increment();
-  };
-
   return {
     document,
+    context,
     updateDocument,
-    increment,
   };
 };

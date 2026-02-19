@@ -35,6 +35,7 @@ export class ShellResolver {
             id: profile.id,
             label: profile.label,
             path: validPath,
+            icon: profile.icon,
           });
         }
       } catch {
