@@ -24,10 +24,18 @@ export class ShellResolver {
           .filter(Boolean);
 
         const validPath = paths.find((p) => {
-          if (!profile.ignorePath) {
-            return true;
+          const normalized = p.toLowerCase().replace(/\\/g, "/");
+
+          // Ignore Windows WSL forwarders
+          if (profile.id === "bash" && process.platform === "win32") {
+            if (
+              normalized.includes("/windows/system32/") ||
+              normalized.includes("/windowsapps")
+            ) {
+              return false;
+            }
           }
-          return !profile.ignorePath.includes(p);
+          return true;
         });
 
         if (validPath) {
@@ -35,6 +43,7 @@ export class ShellResolver {
             id: profile.id,
             label: profile.label,
             path: validPath,
+            args: profile.args,
             icon: profile.icon,
           });
         }

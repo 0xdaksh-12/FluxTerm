@@ -6,3 +6,4 @@ node_modules
 .agent
 *.html
 *.flow
+docs/src

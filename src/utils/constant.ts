@@ -12,28 +12,14 @@ export const shell: ShellProfile[] = [
     id: "powershell",
     label: "PowerShell",
     command: "powershell",
-    args: [
-      "-NoLogo",
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      "& { $Host.Runspace.ThreadOptions = 'ReuseThread'; $Host.SetShouldExit(0); }",
-    ],
+    args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
     icon: "codicon-terminal-powershell",
   },
   {
     id: "pwsh",
     label: "PowerShell Core",
     command: "pwsh",
-    args: [
-      "-NoLogo",
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-Command",
-      "& { $Host.Runspace.ThreadOptions = 'ReuseThread'; $Host.SetShouldExit(0); }",
-    ],
+    args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
     icon: "codicon-terminal-powershell",
   },
   {
@@ -41,10 +27,6 @@ export const shell: ShellProfile[] = [
     label: "Bash",
     command: "bash",
     args: ["-c"],
-    ignorePath: [
-      "C:\\Windows\\System32\\bash.exe",
-      "C:\\Users\\Daksh\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe",
-    ],
     icon: "codicon-terminal-bash",
   },
   {

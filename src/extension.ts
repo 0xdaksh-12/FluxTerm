@@ -10,6 +10,12 @@ export function activate(context: vscode.ExtensionContext) {
   const editorProvider = vscode.window.registerCustomEditorProvider(
     "flow.editor",
     provider,
+    {
+      supportsMultipleEditorsPerDocument: true,
+      // webviewOptions: {
+      //   retainContextWhenHidden: true,
+      // },
+    },
   );
 
   // Register command to create new .flow file

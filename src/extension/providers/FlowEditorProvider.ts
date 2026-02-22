@@ -4,8 +4,8 @@ import { getNonce } from "../../utils/helper";
 import { FlowDocumentSession } from "../services/FlowDocumentSession";
 
 export class FlowEditorProvider implements vscode.CustomTextEditorProvider {
-  // Make a document URI -> sessions
-  private sessions = new Map<string, FlowDocumentSession>();
+  // Key by panel, not URI — supports multiple editors for the same document
+  private sessions = new Map<vscode.WebviewPanel, FlowDocumentSession>();
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
@@ -20,7 +20,7 @@ export class FlowEditorProvider implements vscode.CustomTextEditorProvider {
       webviewPanel,
       this.context,
     );
-    this.sessions.set(document.uri.toString(), session);
+    this.sessions.set(webviewPanel, session);
 
     // Setup Webview HTML
     this.setupWebview(webviewPanel);
@@ -29,7 +29,7 @@ export class FlowEditorProvider implements vscode.CustomTextEditorProvider {
     webviewPanel.onDidDispose(() => {
       Ext.info("Disposing sessions");
       session.dispose();
-      this.sessions.delete(document.uri.toString());
+      this.sessions.delete(webviewPanel);
     });
   }
 

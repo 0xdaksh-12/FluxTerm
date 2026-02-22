@@ -1,78 +1,151 @@
-import * as vscode from "vscode";
-import { FlowDocument } from "../../types/MessageProtocol";
+// =============================================================================
+// FlowDocumentSession.ts
+//
+// Manages the lifecycle of a single .flow document editor panel.
+//
+// Responsibilities:
+//   - Set up the webview and handle all incoming messages from it.
+//   - Delegate block execution to the ExecutionEngine.
+//   - Emit structured messages back to the webview via a typed `post()` helper.
+//   - Detect the initial live context (cwd, git branch) before sending init.
+//   - Persist FlowDocument to disk only when the webview sends an 'update'.
+//
+// This class deliberately holds NO notebook state (blocks, runtimeContext).
+// All notebook state lives in the webview's notebookStore.
+// =============================================================================
 
-import { Ext } from "../../utils/logger";
-import { ShellResolver } from "./ShellResolver";
+import * as vscode from "vscode";
 import * as path from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+
+import {
+  FlowDocument,
+  WebviewMessage,
+  ExtMessage,
+  FlowContext,
+} from "../../types/MessageProtocol";
+import { Ext } from "../../utils/logger";
+import { ShellResolver } from "./ShellResolver";
+import { ExecutionEngine } from "./ExecutionEngine";
 
 const execAsync = promisify(exec);
 
 export class FlowDocumentSession {
   private isDisposed = false;
   private readonly disposables: vscode.Disposable[] = [];
-  private isInitial = true;
+
+  /** Serialised queue for document-write operations. */
   private isProcessing = false;
   private queue: Array<() => Promise<void>> = [];
+
+  /** Execution engine owned by this session. */
+  private readonly engine: ExecutionEngine;
 
   constructor(
     private readonly document: vscode.TextDocument,
     private readonly panel: vscode.WebviewPanel,
     private readonly context: vscode.ExtensionContext,
   ) {
-    this.setupWebview();
+    // Wire up the engine's callbacks to post typed messages to the webview.
+    this.engine = new ExecutionEngine({
+      onStream: (blockId, lines) => {
+        this.post({ type: "stream", blockId, lines });
+      },
+      onComplete: (payload) => {
+        this.post({
+          type: "blockComplete",
+          blockId: payload.blockId,
+          exitCode: payload.exitCode,
+          finalCwd: payload.finalCwd,
+          finalBranch: payload.finalBranch,
+          status: payload.status,
+        });
+      },
+      onError: (blockId, message) => {
+        // Use the dedicated blockError type — not a stream line.
+        this.post({ type: "blockError", blockId, message });
+      },
+    });
+
+    this.setupMessageHandlers();
   }
 
-  /**
-   * Setup the webview
-   */
-  private setupWebview() {
+  // ─── Webview Message Handling ───────────────────────────────────────────────
+
+  private setupMessageHandlers() {
     this.panel.webview.onDidReceiveMessage(
-      async (message: any) => {
+      async (message: WebviewMessage) => {
         if (this.isDisposed) {
           return;
         }
 
         switch (message.type) {
+          // ── Init ─────────────────────────────────────────────────────────────
           case "init": {
-            const doc = this.parseDocument();
-            const cwd = this.getCwd();
-            const branch = await this.getGitBranch(cwd);
+            // Resolve the live context asynchronously so we can provide
+            // the real cwd and git branch rather than stale or empty values.
+            const savedDoc = this.parseDocument();
+            const liveCwd = this.getCwd();
+            const liveBranch = await this.getGitBranch(liveCwd);
 
-            this.panel.webview.postMessage({
-              type: "init",
-              document: doc,
-              context: {
-                cwd: doc.cwd || cwd,
-                branch: doc.branch || branch,
-                connection: "local",
-                shell: doc.shell || null,
-              },
-            });
+            const context: FlowContext = {
+              cwd: liveCwd,
+              branch: liveBranch,
+              // Prefer the shell preference stored in the document, if any.
+              shell: savedDoc.shell ?? null,
+              connection: "local",
+            };
 
-            this.isInitial = false;
-            Ext.info("Initialized flow document session");
+            this.post({ type: "init", document: savedDoc, context });
+            Ext.info("[Session] Sent init with live context");
             break;
           }
 
+          // ── Explicit save ────────────────────────────────────────────────────
           case "update":
+            // Enqueue so concurrent saves are serialised and never interleaved.
             this.enqueue(async () => {
               await this.updateTextDocument(message.document);
+              Ext.info("[Session] Document saved to disk");
             });
             break;
 
-            break;
+          // ── Shell config ─────────────────────────────────────────────────────
           case "shellConfig":
             this.enqueue(async () => {
               const shells = await ShellResolver.resolve();
-              this.panel.webview.postMessage({
-                type: "shellList",
-                shells,
-              });
+              this.post({ type: "shellList", shells });
             });
             break;
 
+          // ── Block execution ───────────────────────────────────────────────────
+          case "execute": {
+            const { blockId, command, shell, args, cwd } = message;
+            Ext.info(`[Session] Execute block ${blockId}: ${command}`);
+            // Args originate from constant.ts, resolved via ShellResolver,
+            // sent by the webview — the engine appends the wrapped command.
+            this.engine.execute(blockId, command, shell, args, cwd);
+            break;
+          }
+
+          // ── Stdin ─────────────────────────────────────────────────────────────
+          case "input": {
+            const { blockId, text } = message;
+            Ext.info(`[Session] Input for block ${blockId}`);
+            this.engine.writeInput(blockId, text);
+            break;
+          }
+
+          // ── Kill ──────────────────────────────────────────────────────────────
+          case "killBlock": {
+            const { blockId } = message;
+            Ext.info(`[Session] Kill block ${blockId}`);
+            this.engine.killBlock(blockId);
+            break;
+          }
+
+          // ── Log relay ─────────────────────────────────────────────────────────
           case "log":
             Ext.info(message.message);
             break;
@@ -85,7 +158,7 @@ export class FlowDocumentSession {
       this.disposables,
     );
 
-    // Handle panel close
+    // Dispose the session when the panel is closed.
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
@@ -97,28 +170,25 @@ export class FlowDocumentSession {
     this.processQueue();
   }
 
-  /**
-   * Process the queue sequentially
-   */
+  /** Drain the queue sequentially; each task awaits the previous one. */
   private async processQueue() {
     if (this.isProcessing) {
       return;
     }
-
     this.isProcessing = true;
 
     while (this.queue.length > 0) {
       if (this.isDisposed) {
         break;
       }
-
       const task = this.queue.shift();
-      if (task) {
-        try {
-          await task();
-        } catch (e) {
-          Ext.error("Error processing document update task", e);
-        }
+      if (!task) {
+        continue;
+      }
+      try {
+        await task();
+      } catch (e) {
+        Ext.error("[Session] Error in queued task", e);
       }
     }
 
@@ -126,26 +196,28 @@ export class FlowDocumentSession {
   }
 
   /**
-   * Parse the document
+   * Parse the .flow file as JSON.
+   * Returns an empty FlowDocument if the file is blank or invalid JSON.
+   * The returned document may have `blocks` and `runtimeContext` if a previous
+   * explicit save was made.
    */
   private parseDocument(): FlowDocument {
     try {
-      const text = this.document.getText();
-      if (!text.trim()) {
+      const text = this.document.getText().trim();
+      if (!text) {
         return {};
       }
       return JSON.parse(text) as FlowDocument;
     } catch {
+      // Corrupt JSON — return empty; the user can still start fresh.
+      Ext.warn("[Session] Could not parse .flow file; starting fresh");
       return {};
     }
   }
 
   /**
-   * Send the document to the webview
-   */
-
-  /**
-   * Update the text document with the given document
+   * Write `doc` to the text document using a WorkspaceEdit.
+   * VS Code's undo/redo stack is preserved.
    */
   private async updateTextDocument(doc: FlowDocument) {
     const edit = new vscode.WorkspaceEdit();
@@ -167,23 +239,39 @@ export class FlowDocumentSession {
     return this.document.uri.path;
   }
 
+  /** Run `git rev-parse --abbrev-ref HEAD` in the given directory. */
   private async getGitBranch(cwd: string): Promise<string | null> {
     try {
       const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", {
         cwd,
       });
-      return stdout.trim();
+      const branch = stdout.trim();
+      return branch === "HEAD" || branch === "" ? null : branch;
     } catch {
       return null;
     }
   }
 
+  // ─── Message Posting ─────────────────────────────────────────────────────────
+
+  /**
+   * Post a typed message to the webview.
+   * Guards against posting after the panel has been disposed.
+   */
+  private post(message: ExtMessage) {
+    if (!this.isDisposed) {
+      this.panel.webview.postMessage(message);
+    }
+  }
+
+  // ─── Lifecycle ───────────────────────────────────────────────────────────────
+
   public dispose() {
     if (this.isDisposed) {
       return;
     }
-
     this.isDisposed = true;
+    this.engine.dispose();
     this.disposables.forEach((d) => d.dispose());
     this.disposables.length = 0;
   }
