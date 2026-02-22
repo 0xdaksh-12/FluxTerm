@@ -1,0 +1,5617 @@
+C:\Users\Daksh\Desktop\projects\Flow\src\extension.ts
+import * as vscode from "vscode";
+
+import { FlowEditorProvider } from "./extension/providers/FlowEditorProvider";
+
+export function activate(context: vscode.ExtensionContext) {
+  console.log('Congratulations, your extension "flow" is now active!');
+
+  // Register the custom editor provider for .flow files
+  const provider = new FlowEditorProvider(context);
+  const editorProvider = vscode.window.registerCustomEditorProvider(
+    "flow.editor",
+    provider,
+    {
+      supportsMultipleEditorsPerDocument: true,
+      // webviewOptions: {
+      //   retainContextWhenHidden: true,
+      // },
+    },
+  );
+
+  // Register command to create new .flow file
+  const newFileCommand = vscode.commands.registerCommand(
+    "flow.newFile",
+    async () => {
+      const uri = await vscode.window.showSaveDialog({
+        filters: { "Flow Files": ["flow"] },
+        defaultUri: vscode.Uri.file("untitled.flow"),
+      });
+
+      if (uri) {
+        // Write default document structure
+        await vscode.workspace.fs.writeFile(
+          uri,
+          Buffer.from(JSON.stringify({}, null, 2)),
+        );
+        // Open with Flow editor
+        await vscode.commands.executeCommand(
+          "vscode.openWith",
+          uri,
+          "flow.editor",
+        );
+      }
+    },
+  );
+
+  // Add all disposables to subscriptions
+  context.subscriptions.push(editorProvider, newFileCommand);
+
+  // Development: Auto-reload on file changes
+  if (process.env.FLOW_DEV_RELOAD === "true") {
+    const watcher = vscode.workspace.createFileSystemWatcher("**/dist/**/*.js");
+    watcher.onDidChange(() => {
+      vscode.commands.executeCommand("workbench.action.reloadWindow");
+    });
+    context.subscriptions.push(watcher);
+  }
+}
+
+export function deactivate() {}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\extension\providers\FlowEditorProvider.ts
+import * as vscode from "vscode";
+import { Ext } from "../../utils/logger";
+import { getNonce } from "../../utils/helper";
+import { FlowDocumentSession } from "../services/FlowDocumentSession";
+
+export class FlowEditorProvider implements vscode.CustomTextEditorProvider {
+  // Key by panel, not URI — supports multiple editors for the same document
+  private sessions = new Map<vscode.WebviewPanel, FlowDocumentSession>();
+
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  public resolveCustomTextEditor(
+    document: vscode.TextDocument,
+    webviewPanel: vscode.WebviewPanel,
+    _token: vscode.CancellationToken,
+  ) {
+    // Create a new session for this document
+    const session = new FlowDocumentSession(
+      document,
+      webviewPanel,
+      this.context,
+    );
+    this.sessions.set(webviewPanel, session);
+
+    // Setup Webview HTML
+    this.setupWebview(webviewPanel);
+
+    // Cleanup on panel disposal
+    webviewPanel.onDidDispose(() => {
+      Ext.info("Disposing sessions");
+      session.dispose();
+      this.sessions.delete(webviewPanel);
+    });
+  }
+
+  /**
+   * Configure webview options and load HTML
+   */
+  private setupWebview(panel: vscode.WebviewPanel) {
+    panel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [
+        vscode.Uri.joinPath(this.context.extensionUri, "dist"),
+        vscode.Uri.joinPath(this.context.extensionUri, "node_modules"),
+      ],
+    };
+    panel.webview.html = this.getHtmlForWebview(panel.webview);
+  }
+
+  /**
+   * Generate HTML for the webview
+   */
+  private getHtmlForWebview(webview: vscode.Webview): string {
+    const scriptUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "dist", "webview.js"),
+    );
+    const styleUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this.context.extensionUri, "dist", "webview.css"),
+    );
+    const codiconsUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(
+        this.context.extensionUri,
+        "node_modules",
+        "@vscode",
+        "codicons",
+        "dist",
+        "codicon.css",
+      ),
+    );
+
+    const nonce = getNonce();
+
+    return `<!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>Flow Editor</title>
+      <link href="${styleUri}" rel="stylesheet">
+      <link href="${codiconsUri}" rel="stylesheet" />
+      <style>
+        body {
+          margin: 0;
+          padding: 0;
+          overflow: auto;
+          background-color: var(--vscode-editor-background);
+          color: var(--vscode-editor-foreground);
+          font-family: var(--vscode-font-family);
+        }
+        #root {
+          width: 100%;
+          min-height: 100vh;
+        }
+      </style>
+    </head>
+    <body>
+      <div id="root"></div>
+      <script nonce="${nonce}" src="${scriptUri}"></script>
+    </body>
+    </html>`;
+  }
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\extension\services\ExecutionEngine.ts
+// =============================================================================
+// ExecutionEngine.ts
+//
+// Manages isolated shell processes for notebook block executions.
+//
+// Design principles:
+//   - Each block gets its own fresh shell process. No process reuse.
+//   - The engine is stateless with respect to notebook data — it only tracks
+//     live processes in its registry.
+//   - Output is streamed line-by-line via the onStream callback.
+//   - After the user command completes, sentinel lines are emitted by the shell
+//     wrapper and parsed to extract finalCwd and finalBranch.
+//   - Meta lines are filtered from visible output before streaming.
+//   - Partial lines (no trailing newline when process closes) are flushed.
+// =============================================================================
+
+import { spawn, ChildProcessWithoutNullStreams } from "child_process";
+import { OutputLine } from "../../types/MessageProtocol";
+import { Ext } from "../../utils/logger";
+
+// ─── Public Interfaces ────────────────────────────────────────────────────────
+
+export interface BlockCompletePayload {
+  blockId: string;
+  exitCode: number | null;
+  finalCwd: string | null;
+  finalBranch: string | null;
+  status: "done" | "error" | "killed";
+}
+
+export interface ExecutionCallbacks {
+  onStream: (blockId: string, lines: OutputLine[]) => void;
+  onComplete: (payload: BlockCompletePayload) => void;
+  onError: (blockId: string, message: string) => void;
+}
+
+// ─── Internal Types ───────────────────────────────────────────────────────────
+
+/** Decoded meta payload emitted by the shell wrapper at command completion. */
+interface ParsedMeta {
+  exit: number;
+  cwd: string;
+  branch: string | null;
+}
+
+/** Per-process tracking record stored in the registry. */
+interface ProcessRecord {
+  process: ChildProcessWithoutNullStreams;
+  /** Incomplete UTF-8 line buffered from stdout until next newline. */
+  stdoutRemainder: string;
+  /** Incomplete UTF-8 line buffered from stderr until next newline. */
+  stderrRemainder: string;
+  /** Parsed meta sentinel; populated when the wrapper emits it. */
+  meta: ParsedMeta | null;
+  /** True once killBlock() has been called. */
+  isKilled: boolean;
+  /** True once finalize() has been called (prevents double-completion). */
+  completed: boolean;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/**
+ * Prefix for the base64-encoded JSON meta line emitted by the shell wrapper.
+ * Must match the prefix used in each ShellAdapter.buildWrapperCommand().
+ */
+const META_PREFIX = "__FLOW_META__";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Normalise a POSIX-style path (MSYS/Cygwin) to a Windows native path so that
+ * Node's `spawn()` cwd option works correctly on Windows.
+ *
+ * e.g. "/c/Users/Daksh/projects" → "C:\Users\Daksh\projects"
+ */
+function normalizeCwd(cwdPath: string): string {
+  if (process.platform === "win32") {
+    const msys = cwdPath.match(/^\/([a-zA-Z])\/(.*)/);
+    if (msys) {
+      return `${msys[1].toUpperCase()}:\\${msys[2].replace(/\//g, "\\")}`;
+    }
+  }
+  return cwdPath;
+}
+
+// ─── ExecutionEngine ──────────────────────────────────────────────────────────
+
+export class ExecutionEngine {
+  /** Live process registry keyed by blockId. */
+  private registry = new Map<string, ProcessRecord>();
+
+  constructor(private callbacks: ExecutionCallbacks) {}
+
+  /**
+   * Spawn a new isolated shell process to execute the given command.
+   * The command is wrapped with sentinel-emitting code so finalCwd and
+   * finalBranch can be extracted after the user command completes.
+   *
+   * @param blockId  - Unique identifier for the block.
+   * @param command  - Raw command string typed by the user.
+   * @param shellPath - Absolute path to the shell binary.
+   * @param cwd      - Working directory for the process.
+   */
+  execute(
+    blockId: string,
+    command: string,
+    shellPath: string,
+    /**
+     * Launch args for the shell binary, passed in from the webview.
+     * These originate from `constant.ts` (ShellProfile.args) and are
+     * resolved by ShellResolver into ResolvedShell.args, then sent
+     * with the execute message. The wrapped command is appended last.
+     */
+    baseArgs: string[],
+    cwd: string,
+  ): void {
+    if (this.registry.has(blockId)) {
+      Ext.warn(`[ExecutionEngine] Block ${blockId} is already running`);
+      return;
+    }
+
+    // Build the wrapper command (sentinel injection); args come from the caller
+    const adapter = ShellAdapter.create(shellPath);
+    const wrappedCommand = adapter.buildWrapperCommand(command);
+    // Append the wrapped command after the base args (e.g. [..."-Command", wrappedCommand])
+    const args = [...baseArgs, wrappedCommand];
+
+    Ext.info(
+      `[ExecutionEngine] Spawning block ${blockId}: ${shellPath} ${args.slice(0, -1).join(" ")} <command>`,
+    );
+
+    let proc: ChildProcessWithoutNullStreams;
+    try {
+      proc = spawn(shellPath, args, {
+        cwd: normalizeCwd(cwd),
+        stdio: "pipe",
+        windowsHide: true,
+        // detached is intentionally omitted: taskkill /f /t covers Windows
+        // process trees, and on POSIX we use SIGTERM on the process directly.
+      }) as ChildProcessWithoutNullStreams;
+    } catch (err: any) {
+      this.callbacks.onError(
+        blockId,
+        `Failed to spawn process: ${err.message}`,
+      );
+      return;
+    }
+
+    const record: ProcessRecord = {
+      process: proc,
+      stdoutRemainder: "",
+      stderrRemainder: "",
+      meta: null,
+      isKilled: false,
+      completed: false,
+    };
+
+    this.registry.set(blockId, record);
+    this.attachStreamHandlers(blockId, record);
+
+    proc.on("close", (code) => {
+      this.finalize(blockId, code);
+    });
+
+    proc.on("error", (err) => {
+      Ext.error(`[ExecutionEngine] Process error for block ${blockId}:`, err);
+      this.flushRemainders(blockId, record);
+      this.cleanupRegistry(blockId);
+      this.callbacks.onError(blockId, err.message);
+    });
+  }
+
+  /**
+   * Write user-provided text to the stdin of a running block's process.
+   * Ignored silently if the block is not running or stdin is closed.
+   *
+   * @param blockId - The block whose process should receive the input.
+   * @param text    - The input text (a newline is appended automatically).
+   */
+  writeInput(blockId: string, text: string): void {
+    const rec = this.registry.get(blockId);
+    if (!rec || rec.completed || rec.isKilled) {
+      Ext.warn(
+        `[ExecutionEngine] No active process for block ${blockId} to write input to`,
+      );
+      return;
+    }
+    if (!rec.process.stdin.writable) {
+      return;
+    }
+    try {
+      rec.process.stdin.write(text + "\n");
+      // Echo the input line back to the stream so the webview can display it
+      this.callbacks.onStream(blockId, [{ type: "stdin", text }]);
+    } catch (err: any) {
+      Ext.error(
+        `[ExecutionEngine] Failed to write input to block ${blockId}:`,
+        err,
+      );
+    }
+  }
+
+  /**
+   * Terminate the process associated with a block.
+   * On Windows, the entire process tree is killed via taskkill.
+   * On POSIX, SIGTERM is sent to the process.
+   *
+   * @param blockId - The block whose process should be terminated.
+   */
+  killBlock(blockId: string): void {
+    const rec = this.registry.get(blockId);
+    if (!rec || rec.completed) {
+      Ext.warn(
+        `[ExecutionEngine] No active process to kill for block ${blockId}`,
+      );
+      return;
+    }
+
+    rec.isKilled = true;
+
+    const pid = rec.process.pid;
+    if (pid === undefined) {
+      return;
+    }
+
+    try {
+      if (process.platform === "win32") {
+        // Kill the entire process tree so child processes don't linger
+        spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
+          windowsHide: true,
+        });
+      } else {
+        rec.process.kill("SIGTERM");
+      }
+    } catch (err: any) {
+      Ext.error(`[ExecutionEngine] Error killing block ${blockId}:`, err);
+    }
+  }
+
+  /**
+   * Kill all running processes and clear the registry.
+   * Called when the editor panel is disposed.
+   */
+  dispose(): void {
+    for (const id of this.registry.keys()) {
+      this.killBlock(id);
+    }
+    this.registry.clear();
+  }
+
+  // ─── Private Methods ────────────────────────────────────────────────────────
+
+  /** Attach data handlers to stdout and stderr streams. */
+  private attachStreamHandlers(blockId: string, record: ProcessRecord) {
+    record.process.stdout.setEncoding("utf-8");
+    record.process.stderr.setEncoding("utf-8");
+
+    record.process.stdout.on("data", (chunk: string) => {
+      this.handleChunk(blockId, record, chunk, "stdout");
+    });
+
+    record.process.stderr.on("data", (chunk: string) => {
+      this.handleChunk(blockId, record, chunk, "stderr");
+    });
+  }
+
+  /**
+   * Process an incoming data chunk from stdout or stderr.
+   * Lines are split on newlines; the last fragment (no newline yet) is held
+   * in the remainder until the next chunk or process close.
+   * Meta lines are parsed and stored; visible lines are streamed.
+   */
+  private handleChunk(
+    blockId: string,
+    record: ProcessRecord,
+    chunk: string,
+    type: "stdout" | "stderr",
+  ) {
+    const key = type === "stdout" ? "stdoutRemainder" : "stderrRemainder";
+    record[key] += chunk;
+
+    const lines = record[key].split(/\r?\n/);
+    // Last element is the incomplete fragment — keep it for next chunk
+    record[key] = lines.pop() ?? "";
+
+    const visible: OutputLine[] = [];
+    for (const line of lines) {
+      if (line.startsWith(META_PREFIX)) {
+        // Parse and store meta; don't surface to output
+        const parsed = this.parseMetaLine(line);
+        if (parsed) {
+          record.meta = parsed;
+        }
+      } else if (line.length > 0) {
+        visible.push({ type, text: line });
+      }
+    }
+
+    if (visible.length > 0) {
+      this.callbacks.onStream(blockId, visible);
+    }
+  }
+
+  /**
+   * Flush any partial line remaining in stdout/stderr remainder buffers.
+   * Called on process close to ensure no output is silently discarded.
+   */
+  private flushRemainders(blockId: string, record: ProcessRecord) {
+    const toFlush: OutputLine[] = [];
+
+    if (record.stdoutRemainder.length > 0) {
+      if (!record.stdoutRemainder.startsWith(META_PREFIX)) {
+        toFlush.push({ type: "stdout", text: record.stdoutRemainder });
+      }
+      record.stdoutRemainder = "";
+    }
+
+    if (record.stderrRemainder.length > 0) {
+      if (!record.stderrRemainder.startsWith(META_PREFIX)) {
+        toFlush.push({ type: "stderr", text: record.stderrRemainder });
+      }
+      record.stderrRemainder = "";
+    }
+
+    if (toFlush.length > 0) {
+      this.callbacks.onStream(blockId, toFlush);
+    }
+  }
+
+  /**
+   * Called when the process emits its 'close' event.
+   * Flushes remaining output, parses meta, and emits the completion payload.
+   */
+  private finalize(blockId: string, code: number | null) {
+    const rec = this.registry.get(blockId);
+    if (!rec || rec.completed) {
+      return;
+    }
+
+    rec.completed = true;
+
+    // Flush any partial lines that didn't end with a newline
+    this.flushRemainders(blockId, rec);
+
+    const meta = rec.meta;
+    const exitCode = meta?.exit ?? code ?? null;
+
+    const payload: BlockCompletePayload = {
+      blockId,
+      exitCode,
+      finalCwd: meta?.cwd ?? null,
+      finalBranch: meta?.branch ?? null,
+      status: rec.isKilled ? "killed" : exitCode === 0 ? "done" : "error",
+    };
+
+    this.cleanupRegistry(blockId);
+    this.callbacks.onComplete(payload);
+  }
+
+  /**
+   * Decode a base64-encoded JSON meta line emitted by the shell wrapper.
+   * Returns null if the line is malformed.
+   */
+  private parseMetaLine(line: string): ParsedMeta | null {
+    if (!line.startsWith(META_PREFIX)) {
+      return null;
+    }
+    try {
+      const encoded = line.slice(META_PREFIX.length).trim();
+      const json = Buffer.from(encoded, "base64").toString("utf-8");
+      return JSON.parse(json) as ParsedMeta;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Remove a block's record from the registry. */
+  private cleanupRegistry(blockId: string) {
+    this.registry.delete(blockId);
+  }
+}
+
+// =============================================================================
+// ShellAdapter — per-shell command wrapping and argument building
+// =============================================================================
+
+/**
+ * Abstract base for shell-specific command wrapping strategies.
+ * Subclasses know how to:
+ *   1. Wrap a user command with sentinel-emitting code (buildWrapperCommand).
+ *   2. Build the argument list to launch the shell binary (buildLaunchArgs).
+ */
+abstract class ShellAdapter {
+  /**
+   * Factory method. Inspects the shell path to return the correct adapter.
+   */
+  static create(shellPath: string): ShellAdapter {
+    const name =
+      shellPath.toLowerCase().replace(/\\/g, "/").split("/").pop() ?? "";
+
+    if (name.startsWith("powershell") || name.startsWith("pwsh")) {
+      return new PowerShellAdapter();
+    }
+    if (name === "cmd.exe" || name === "cmd") {
+      return new CmdAdapter();
+    }
+    return new PosixAdapter();
+  }
+
+  /**
+   * Wrap the user's command so that after it completes, the shell emits a
+   * base64-encoded JSON line containing exit code, cwd, and git branch.
+   * Launch args are NOT the adapter's concern — they come from constant.ts.
+   */
+  abstract buildWrapperCommand(command: string): string;
+}
+
+// ─── PowerShell (powershell.exe / pwsh.exe) ───────────────────────────────────
+
+class PowerShellAdapter extends ShellAdapter {
+  buildWrapperCommand(command: string): string {
+    // Run the user command first, then capture exit code, cwd, and branch.
+    // ConvertTo-Json -Compress produces a single-line JSON object.
+    // The JSON is base64-encoded to avoid issues with special characters in paths.
+    return [
+      `${command}`,
+      `$__exit = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 0 }`,
+      `$__cwd = (Get-Location).Path`,
+      `$__branch = (git rev-parse --abbrev-ref HEAD 2>$null)`,
+      `$__metaObj = [ordered]@{ exit=[int]$__exit; cwd=$__cwd; branch=$__branch }`,
+      `$__json = $__metaObj | ConvertTo-Json -Compress`,
+      `$__bytes = [System.Text.Encoding]::UTF8.GetBytes($__json)`,
+      `$__meta = [Convert]::ToBase64String($__bytes)`,
+      `Write-Output "${META_PREFIX}$__meta"`,
+      `exit $__exit`,
+    ].join("; ");
+  }
+
+  // Launch args (e.g. -NoLogo, -NoProfile…) are defined in constant.ts.
+  // The engine appends the wrapped command to whatever baseArgs the webview sends.
+}
+
+// ─── POSIX (bash, zsh, sh, fish, …) ──────────────────────────────────────────
+
+class PosixAdapter extends ShellAdapter {
+  buildWrapperCommand(command: string): string {
+    // Run the user command directly (no subshell) so that `cd` and any other
+    // directory-changing command propagates to the sentinel's $(pwd) capture.
+    // A subshell would isolate the `cd` effect — defeating the whole point.
+    return [
+      command,
+      `__exit=$?`,
+      `__cwd=$(pwd)`,
+      `__branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")`,
+      // printf avoids locale-specific quoting; tr -d '\n' strips base64 line breaks
+      `__json=$(printf '{"exit":%s,"cwd":"%s","branch":"%s"}' "$__exit" "$__cwd" "$__branch")`,
+      `__meta=$(printf "%s" "$__json" | base64 | tr -d '\\n')`,
+      `echo "${META_PREFIX}$__meta"`,
+      `exit $__exit`,
+    ].join("; ");
+  }
+
+  // Launch args (e.g. -c) defined in constant.ts.
+}
+
+// ─── cmd.exe ──────────────────────────────────────────────────────────────────
+
+class CmdAdapter extends ShellAdapter {
+  buildWrapperCommand(command: string): string {
+    // cmd.exe has no native base64 — we shell out to PowerShell for encoding.
+    return [
+      `${command}`,
+      `set __exit=%ERRORLEVEL%`,
+      `for /f "delims=" %%i in ('cd') do set __cwd=%%i`,
+      `for /f "delims=" %%i in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set __branch=%%i`,
+      `powershell -NoProfile -Command "$obj=[ordered]@{exit=[int]'%__exit%';cwd='%__cwd%';branch='%__branch%'};$j=$obj|ConvertTo-Json -Compress;$b=[Text.Encoding]::UTF8.GetBytes($j);[Convert]::ToBase64String($b)" > "%TEMP%\\flow_meta.txt"`,
+      `set /p __meta=<"%TEMP%\\flow_meta.txt"`,
+      `echo ${META_PREFIX}%__meta%`,
+      `exit /b %__exit%`,
+    ].join(" & ");
+  }
+
+  // Launch args (e.g. /d, /s, /c) defined in constant.ts.
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\extension\services\FlowDocumentSession.ts
+// =============================================================================
+// FlowDocumentSession.ts
+//
+// Manages the lifecycle of a single .flow document editor panel.
+//
+// Responsibilities:
+//   - Set up the webview and handle all incoming messages from it.
+//   - Delegate block execution to the ExecutionEngine.
+//   - Emit structured messages back to the webview via a typed `post()` helper.
+//   - Detect the initial live context (cwd, git branch) before sending init.
+//   - Persist FlowDocument to disk only when the webview sends an 'update'.
+//
+// This class deliberately holds NO notebook state (blocks, runtimeContext).
+// All notebook state lives in the webview's notebookStore.
+// =============================================================================
+
+import * as vscode from "vscode";
+import * as path from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+import {
+  FlowDocument,
+  WebviewMessage,
+  ExtMessage,
+  FlowContext,
+} from "../../types/MessageProtocol";
+import { Ext } from "../../utils/logger";
+import { ShellResolver } from "./ShellResolver";
+import { ExecutionEngine } from "./ExecutionEngine";
+
+const execAsync = promisify(exec);
+
+export class FlowDocumentSession {
+  private isDisposed = false;
+  private readonly disposables: vscode.Disposable[] = [];
+
+  /** Serialised queue for document-write operations. */
+  private isProcessing = false;
+  private queue: Array<() => Promise<void>> = [];
+
+  /** Execution engine owned by this session. */
+  private readonly engine: ExecutionEngine;
+
+  constructor(
+    private readonly document: vscode.TextDocument,
+    private readonly panel: vscode.WebviewPanel,
+    private readonly context: vscode.ExtensionContext,
+  ) {
+    // Wire up the engine's callbacks to post typed messages to the webview.
+    this.engine = new ExecutionEngine({
+      onStream: (blockId, lines) => {
+        this.post({ type: "stream", blockId, lines });
+      },
+      onComplete: (payload) => {
+        this.post({
+          type: "blockComplete",
+          blockId: payload.blockId,
+          exitCode: payload.exitCode,
+          finalCwd: payload.finalCwd,
+          finalBranch: payload.finalBranch,
+          status: payload.status,
+        });
+      },
+      onError: (blockId, message) => {
+        // Use the dedicated blockError type — not a stream line.
+        this.post({ type: "blockError", blockId, message });
+      },
+    });
+
+    this.setupMessageHandlers();
+  }
+
+  // ─── Webview Message Handling ───────────────────────────────────────────────
+
+  private setupMessageHandlers() {
+    this.panel.webview.onDidReceiveMessage(
+      async (message: WebviewMessage) => {
+        if (this.isDisposed) {
+          return;
+        }
+
+        switch (message.type) {
+          // ── Init ─────────────────────────────────────────────────────────────
+          case "init": {
+            // Resolve the live context asynchronously so we can provide
+            // the real cwd and git branch rather than stale or empty values.
+            const savedDoc = this.parseDocument();
+            const liveCwd = this.getCwd();
+            const liveBranch = await this.getGitBranch(liveCwd);
+
+            const context: FlowContext = {
+              cwd: liveCwd,
+              branch: liveBranch,
+              // Prefer the shell preference stored in the document, if any.
+              shell: savedDoc.shell ?? null,
+              connection: "local",
+            };
+
+            this.post({ type: "init", document: savedDoc, context });
+            Ext.info("[Session] Sent init with live context");
+            break;
+          }
+
+          // ── Explicit save ────────────────────────────────────────────────────
+          case "update":
+            // Enqueue so concurrent saves are serialised and never interleaved.
+            this.enqueue(async () => {
+              await this.updateTextDocument(message.document);
+              Ext.info("[Session] Document saved to disk");
+            });
+            break;
+
+          // ── Shell config ─────────────────────────────────────────────────────
+          case "shellConfig":
+            this.enqueue(async () => {
+              const shells = await ShellResolver.resolve();
+              this.post({ type: "shellList", shells });
+            });
+            break;
+
+          // ── Block execution ───────────────────────────────────────────────────
+          case "execute": {
+            const { blockId, command, shell, args, cwd } = message;
+            Ext.info(`[Session] Execute block ${blockId}: ${command}`);
+            // Args originate from constant.ts, resolved via ShellResolver,
+            // sent by the webview — the engine appends the wrapped command.
+            this.engine.execute(blockId, command, shell, args, cwd);
+            break;
+          }
+
+          // ── Stdin ─────────────────────────────────────────────────────────────
+          case "input": {
+            const { blockId, text } = message;
+            Ext.info(`[Session] Input for block ${blockId}`);
+            this.engine.writeInput(blockId, text);
+            break;
+          }
+
+          // ── Kill ──────────────────────────────────────────────────────────────
+          case "killBlock": {
+            const { blockId } = message;
+            Ext.info(`[Session] Kill block ${blockId}`);
+            this.engine.killBlock(blockId);
+            break;
+          }
+
+          // ── Log relay ─────────────────────────────────────────────────────────
+          case "log":
+            Ext.info(message.message);
+            break;
+
+          default:
+            break;
+        }
+      },
+      null,
+      this.disposables,
+    );
+
+    // Dispose the session when the panel is closed.
+    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+  }
+
+  /**
+   * Add a task to the queue and try to process it
+   */
+  private enqueue(task: () => Promise<void>) {
+    this.queue.push(task);
+    this.processQueue();
+  }
+
+  /** Drain the queue sequentially; each task awaits the previous one. */
+  private async processQueue() {
+    if (this.isProcessing) {
+      return;
+    }
+    this.isProcessing = true;
+
+    while (this.queue.length > 0) {
+      if (this.isDisposed) {
+        break;
+      }
+      const task = this.queue.shift();
+      if (!task) {
+        continue;
+      }
+      try {
+        await task();
+      } catch (e) {
+        Ext.error("[Session] Error in queued task", e);
+      }
+    }
+
+    this.isProcessing = false;
+  }
+
+  /**
+   * Parse the .flow file as JSON.
+   * Returns an empty FlowDocument if the file is blank or invalid JSON.
+   * The returned document may have `blocks` and `runtimeContext` if a previous
+   * explicit save was made.
+   */
+  private parseDocument(): FlowDocument {
+    try {
+      const text = this.document.getText().trim();
+      if (!text) {
+        return {};
+      }
+      return JSON.parse(text) as FlowDocument;
+    } catch {
+      // Corrupt JSON — return empty; the user can still start fresh.
+      Ext.warn("[Session] Could not parse .flow file; starting fresh");
+      return {};
+    }
+  }
+
+  /**
+   * Write `doc` to the text document using a WorkspaceEdit.
+   * VS Code's undo/redo stack is preserved.
+   */
+  private async updateTextDocument(doc: FlowDocument) {
+    const edit = new vscode.WorkspaceEdit();
+    const json = JSON.stringify(doc, null, 2);
+
+    const fullRange = new vscode.Range(
+      this.document.positionAt(0),
+      this.document.positionAt(this.document.getText().length),
+    );
+
+    edit.replace(this.document.uri, fullRange, json);
+    await vscode.workspace.applyEdit(edit);
+  }
+
+  private getCwd(): string {
+    if (this.document.uri.scheme === "file") {
+      return path.dirname(this.document.uri.fsPath);
+    }
+    return this.document.uri.path;
+  }
+
+  /** Run `git rev-parse --abbrev-ref HEAD` in the given directory. */
+  private async getGitBranch(cwd: string): Promise<string | null> {
+    try {
+      const { stdout } = await execAsync("git rev-parse --abbrev-ref HEAD", {
+        cwd,
+      });
+      const branch = stdout.trim();
+      return branch === "HEAD" || branch === "" ? null : branch;
+    } catch {
+      return null;
+    }
+  }
+
+  // ─── Message Posting ─────────────────────────────────────────────────────────
+
+  /**
+   * Post a typed message to the webview.
+   * Guards against posting after the panel has been disposed.
+   */
+  private post(message: ExtMessage) {
+    if (!this.isDisposed) {
+      this.panel.webview.postMessage(message);
+    }
+  }
+
+  // ─── Lifecycle ───────────────────────────────────────────────────────────────
+
+  public dispose() {
+    if (this.isDisposed) {
+      return;
+    }
+    this.isDisposed = true;
+    this.engine.dispose();
+    this.disposables.forEach((d) => d.dispose());
+    this.disposables.length = 0;
+  }
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\extension\services\ShellResolver.ts
+import { shell } from "../../utils/constant";
+import { ResolvedShell, ShellProfile } from "../../types/MessageProtocol";
+import { exec } from "child_process";
+import { promisify } from "util";
+
+const execAsync = promisify(exec);
+
+export class ShellResolver {
+  static async resolve(): Promise<ResolvedShell[]> {
+    const platform = process.platform;
+    const resolver = platform === "win32" ? "where.exe" : "which";
+
+    const results: ResolvedShell[] = [];
+
+    for (const profile of shell) {
+      try {
+        const command = `${resolver} ${profile.command}`;
+
+        const { stdout } = await execAsync(command);
+
+        const paths = stdout
+          .split(/\r?\n/)
+          .map((p) => p.trim())
+          .filter(Boolean);
+
+        const validPath = paths.find((p) => {
+          const normalized = p.toLowerCase().replace(/\\/g, "/");
+
+          // Ignore Windows WSL forwarders
+          if (profile.id === "bash" && process.platform === "win32") {
+            if (
+              normalized.includes("/windows/system32/") ||
+              normalized.includes("/windowsapps")
+            ) {
+              return false;
+            }
+          }
+          return true;
+        });
+
+        if (validPath) {
+          results.push({
+            id: profile.id,
+            label: profile.label,
+            path: validPath,
+            args: profile.args,
+            icon: profile.icon,
+          });
+        }
+      } catch {
+        // shell not found → skip silently
+      }
+    }
+
+    return results;
+  }
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\test\ExecutionEngine.test.ts
+// =============================================================================
+// ExecutionEngine.test.ts
+//
+// Unit tests for ExecutionEngine using Vitest.
+// No VS Code host required — the engine only uses Node's child_process.
+//
+// Run:  pnpm test:engine
+// =============================================================================
+
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as os from "os";
+import * as path from "path";
+import * as fs from "fs";
+
+import {
+  ExecutionEngine,
+  BlockCompletePayload,
+  ExecutionCallbacks,
+} from "../extension/services/ExecutionEngine";
+import { OutputLine } from "../types/MessageProtocol";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const IS_WIN = process.platform === "win32";
+
+/** Shell info for the current platform. */
+const SHELL = IS_WIN
+  ? {
+      path: "powershell.exe",
+      args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
+    }
+  : { path: "/bin/bash", args: ["-c"] };
+
+const CWD = os.tmpdir();
+
+/**
+ * Run a single command through the engine and collect all events.
+ * Returns a promise that resolves when the block completes (or errors).
+ */
+function runBlock(
+  command: string,
+  cwd = CWD,
+): Promise<{
+  streams: OutputLine[];
+  complete: BlockCompletePayload | null;
+  error: { blockId: string; message: string } | null;
+}> {
+  return new Promise((resolve) => {
+    const streams: OutputLine[] = [];
+    let complete: BlockCompletePayload | null = null;
+    let error: { blockId: string; message: string } | null = null;
+
+    const callbacks: ExecutionCallbacks = {
+      onStream: (_id, lines) => streams.push(...lines),
+      onComplete: (payload) => {
+        complete = payload;
+        resolve({ streams, complete, error });
+      },
+      onError: (blockId, message) => {
+        error = { blockId, message };
+        resolve({ streams, complete, error });
+      },
+    };
+
+    const engine = new ExecutionEngine(callbacks);
+    const blockId = "test-block";
+    engine.execute(blockId, command, SHELL.path, SHELL.args, cwd);
+  });
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+describe("ExecutionEngine", () => {
+  // ── 1. Basic stdout streaming ────────────────────────────────────────────────
+
+  describe("stdout streaming", () => {
+    it("streams stdout lines to onStream", async () => {
+      const cmd = IS_WIN ? "Write-Output 'hello'" : "echo hello";
+      const { streams, complete } = await runBlock(cmd);
+
+      const stdoutLines = streams
+        .filter((l) => l.type === "stdout")
+        .map((l) => l.text);
+
+      expect(stdoutLines).toContain("hello");
+      expect(complete?.exitCode).toBe(0);
+      expect(complete?.status).toBe("done");
+    });
+
+    it("streams multiple stdout lines", async () => {
+      const cmd = IS_WIN
+        ? "Write-Output 'line1'; Write-Output 'line2'; Write-Output 'line3'"
+        : "printf 'line1\\nline2\\nline3\\n'";
+
+      const { streams } = await runBlock(cmd);
+      const texts = streams
+        .filter((l) => l.type === "stdout")
+        .map((l) => l.text);
+
+      expect(texts).toContain("line1");
+      expect(texts).toContain("line2");
+      expect(texts).toContain("line3");
+    });
+  });
+
+  // ── 2. stderr streaming ──────────────────────────────────────────────────────
+
+  describe("stderr streaming", () => {
+    it("streams stderr to onStream with type=stderr", async () => {
+      const cmd = IS_WIN
+        ? "[Console]::Error.WriteLine('err-output')"
+        : "echo err-output >&2";
+
+      const { streams } = await runBlock(cmd);
+      const errLines = streams
+        .filter((l) => l.type === "stderr")
+        .map((l) => l.text);
+
+      expect(errLines.some((t) => t.includes("err-output"))).toBe(true);
+    });
+  });
+
+  // ── 3. Exit code capture ─────────────────────────────────────────────────────
+
+  describe("exit codes", () => {
+    it("captures exit code 0 for successful commands", async () => {
+      const cmd = IS_WIN ? "exit 0" : "true";
+      const { complete } = await runBlock(cmd);
+      expect(complete?.exitCode).toBe(0);
+      expect(complete?.status).toBe("done");
+    });
+
+    it("captures non-zero exit code and sets status=error", async () => {
+      const cmd = IS_WIN ? "exit 42" : "exit 42";
+      const { complete } = await runBlock(cmd);
+      expect(complete?.exitCode).toBe(42);
+      expect(complete?.status).toBe("error");
+    });
+
+    it("captures exit code 1 for failed commands", async () => {
+      // Use an explicit `exit 1` — shell-specific error commands don't always
+      // propagate as process exit codes (e.g. PowerShell terminating errors).
+      const cmd = IS_WIN ? "exit 1" : "exit 1";
+      const { complete } = await runBlock(cmd);
+      expect(complete?.exitCode).toBe(1);
+      expect(complete?.status).toBe("error");
+    });
+  });
+
+  // ── 4. finalCwd — cd must update the captured cwd (the bug we fixed) ────────
+
+  describe("finalCwd after cd", () => {
+    it("captures the new cwd after cd", async () => {
+      const targetDir = os.homedir();
+      const cmd = IS_WIN ? `Set-Location '${targetDir}'` : `cd '${targetDir}'`;
+
+      const { complete } = await runBlock(cmd, CWD);
+
+      // On POSIX, paths may differ slightly (e.g. symlinks) — normalise
+      const expected = fs.realpathSync(targetDir);
+      const actual = complete?.finalCwd
+        ? fs.realpathSync(complete.finalCwd)
+        : null;
+
+      expect(actual).toBe(expected);
+    });
+
+    it("keeps the original cwd when no cd is performed", async () => {
+      const cmd = IS_WIN ? "Write-Output 'no-cd'" : "echo no-cd";
+      const { complete } = await runBlock(cmd, CWD);
+
+      const expected = fs.realpathSync(CWD);
+      const actual = complete?.finalCwd
+        ? fs.realpathSync(complete.finalCwd)
+        : null;
+
+      expect(actual).toBe(expected);
+    });
+
+    it("cwd reflects nested cd", async () => {
+      // cd into a real temp subdirectory
+      const subDir = fs.mkdtempSync(path.join(os.tmpdir(), "flow-test-"));
+      try {
+        const cmd = IS_WIN ? `Set-Location '${subDir}'` : `cd '${subDir}'`;
+
+        const { complete } = await runBlock(cmd, CWD);
+
+        const expected = fs.realpathSync(subDir);
+        const actual = complete?.finalCwd
+          ? fs.realpathSync(complete.finalCwd)
+          : null;
+
+        expect(actual).toBe(expected);
+      } finally {
+        fs.rmdirSync(subDir);
+      }
+    });
+  });
+
+  // ── 5. Sentinel parsing — finalCwd and finalBranch ──────────────────────────
+
+  describe("meta sentinel", () => {
+    it("captures finalCwd and finalBranch for a successful command", async () => {
+      // Run a simple command, rely on the real ShellAdapter to inject the sentinel
+      const cmd = IS_WIN ? "Write-Output 'meta-test'" : "echo meta-test";
+      const { complete, error } = await runBlock(cmd);
+
+      expect(error).toBeNull();
+      expect(complete).not.toBeNull();
+      expect(complete?.exitCode).toBe(0);
+
+      // finalCwd should always be captured as a string
+      expect(typeof complete?.finalCwd).toBe("string");
+
+      // finalBranch is optional depending on environment (null or string)
+      expect(complete?.finalBranch !== undefined).toBe(true);
+    });
+  });
+
+  // ── 6. stdin input / writeInput echo ────────────────────────────────────────
+
+  describe("writeInput", () => {
+    it("sends text to stdin and echoes it with type=stdin", () => {
+      return new Promise<void>((resolve, reject) => {
+        const streams: OutputLine[] = [];
+        let engine!: ExecutionEngine;
+
+        const callbacks: ExecutionCallbacks = {
+          onStream: (_id, lines) => {
+            streams.push(...lines);
+          },
+          onComplete: () => {
+            const stdinLines = streams.filter((l) => l.type === "stdin");
+            try {
+              expect(stdinLines.length).toBeGreaterThan(0);
+              expect(stdinLines[0].text).toBe("hello-stdin");
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          },
+          onError: (_id, msg) => reject(new Error(msg)),
+        };
+
+        engine = new ExecutionEngine(callbacks);
+
+        // Use cat (reads stdin until EOF) — write a line and then close stdin
+        const cmd = IS_WIN ? "$input | ForEach-Object { $_ }" : "cat";
+        engine.execute("stdin-test", cmd, SHELL.path, SHELL.args, CWD);
+
+        setTimeout(() => {
+          engine.writeInput("stdin-test", "hello-stdin");
+          engine.killBlock("stdin-test"); // cat won't exit on its own
+        }, 300);
+      });
+    });
+  });
+
+  // ── 7. Kill process ──────────────────────────────────────────────────────────
+
+  describe("killBlock", () => {
+    it("kills a running process and emits status=killed", () => {
+      return new Promise<void>((resolve, reject) => {
+        let engine!: ExecutionEngine;
+
+        const callbacks: ExecutionCallbacks = {
+          onStream: () => {},
+          onComplete: (payload) => {
+            try {
+              expect(payload.status).toBe("killed");
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          },
+          onError: (_id, msg) => reject(new Error(msg)),
+        };
+
+        engine = new ExecutionEngine(callbacks);
+
+        // Long-running sleep that we will kill
+        const cmd = IS_WIN ? "Start-Sleep -Seconds 30" : "sleep 30";
+        engine.execute("kill-test", cmd, SHELL.path, SHELL.args, CWD);
+
+        // Kill after a brief delay so the process is definitely running
+        setTimeout(() => engine.killBlock("kill-test"), 400);
+      });
+    });
+
+    it("silently ignores killBlock for a non-existent blockId", () => {
+      const engine = new ExecutionEngine({
+        onStream: () => {},
+        onComplete: () => {},
+        onError: () => {},
+      });
+      // Should not throw
+      expect(() => engine.killBlock("does-not-exist")).not.toThrow();
+    });
+  });
+
+  // ── 8. Duplicate execute guard ────────────────────────────────────────────────
+
+  describe("duplicate execute guard", () => {
+    it("ignores a second execute call for the same blockId while running", () => {
+      return new Promise<void>((resolve, reject) => {
+        let completeCount = 0;
+
+        const callbacks: ExecutionCallbacks = {
+          onStream: () => {},
+          onComplete: (payload) => {
+            completeCount++;
+            if (completeCount === 1) {
+              // Only one completion expected — pass
+              resolve();
+            } else {
+              reject(
+                new Error("onComplete called more than once for same blockId"),
+              );
+            }
+          },
+          onError: (_id, msg) => reject(new Error(msg)),
+        };
+
+        const engine = new ExecutionEngine(callbacks);
+        const cmd = IS_WIN
+          ? "Start-Sleep -Milliseconds 200; Write-Output 'done'"
+          : "sleep 0.2 && echo done";
+
+        engine.execute("dup-test", cmd, SHELL.path, SHELL.args, CWD);
+        // Second call should be silently ignored
+        engine.execute("dup-test", cmd, SHELL.path, SHELL.args, CWD);
+      });
+    });
+  });
+
+  // ── 9. Concurrent blocks ──────────────────────────────────────────────────────
+
+  describe("concurrent blocks", () => {
+    it("runs two blocks concurrently and completes both independently", async () => {
+      const results: Record<string, BlockCompletePayload> = {};
+
+      await new Promise<void>((resolve) => {
+        let done = 0;
+        const check = () => {
+          if (++done === 2) resolve();
+        };
+
+        const callbacks: ExecutionCallbacks = {
+          onStream: () => {},
+          onComplete: (p) => {
+            results[p.blockId] = p;
+            check();
+          },
+          onError: () => check(),
+        };
+
+        const engine = new ExecutionEngine(callbacks);
+        const cmd1 = IS_WIN ? "Write-Output 'block-a'" : "echo block-a";
+        const cmd2 = IS_WIN ? "Write-Output 'block-b'" : "echo block-b";
+
+        engine.execute("block-a", cmd1, SHELL.path, SHELL.args, CWD);
+        engine.execute("block-b", cmd2, SHELL.path, SHELL.args, CWD);
+      });
+
+      expect(results["block-a"]?.exitCode).toBe(0);
+      expect(results["block-b"]?.exitCode).toBe(0);
+    });
+  });
+
+  // ── 10. dispose ───────────────────────────────────────────────────────────────
+
+  describe("dispose", () => {
+    it("dispose kills all running processes without throwing", () => {
+      return new Promise<void>((resolve) => {
+        const engine = new ExecutionEngine({
+          onStream: () => {},
+          onComplete: () => {},
+          onError: () => {},
+        });
+
+        const cmd = IS_WIN ? "Start-Sleep -Seconds 30" : "sleep 30";
+        engine.execute("dispose-test", cmd, SHELL.path, SHELL.args, CWD);
+
+        setTimeout(() => {
+          expect(() => engine.dispose()).not.toThrow();
+          resolve();
+        }, 300);
+      });
+    });
+  });
+}, 30_000); // global timeout — real process spawning can be slow
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\test\extension.test.ts
+import * as assert from 'assert';
+
+// You can import and use all API from the 'vscode' module
+// as well as import your extension to test it
+import * as vscode from 'vscode';
+// import * as myExtension from '../../extension';
+
+suite('Extension Test Suite', () => {
+        vscode.window.showInformationMessage('Start all tests.');
+
+        test('Sample test', () => {
+                assert.strictEqual(-1, [1, 2, 3].indexOf(5));
+                assert.strictEqual(-1, [1, 2, 3].indexOf(0));
+        });
+});
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\types\MessageProtocol.ts
+// =============================================================================
+// MessageProtocol.ts
+//
+// The strict contract between the extension host and the webview.
+// All messages crossing that boundary must conform to these types.
+//
+// Architecture:
+//   - Extension = pure execution engine + message bridge (no notebook state)
+//   - Webview   = single source of truth for all notebook state
+//   - FlowDocument = full notebook state persisted on explicit user save only
+// =============================================================================
+
+// ─── Output & Block Types ─────────────────────────────────────────────────────
+
+/** A single line of output produced by a running block process. */
+export interface OutputLine {
+  /** "stdout" = normal output, "stderr" = error output, "stdin" = echoed input */
+  type: "stdout" | "stderr" | "stdin";
+  text: string;
+}
+
+export type BlockStatus = "idle" | "running" | "done" | "error" | "killed";
+
+/**
+ * Represents one executed command block in the notebook.
+ * Shell path, cwd, and branch are frozen at creation time and never change.
+ * Final values (finalCwd, finalBranch, exitCode) are populated on completion.
+ */
+export interface FlowBlock {
+  /** Unique identifier for this block. */
+  id: string;
+  /** Sequential display number, monotonically increasing. */
+  seq: number;
+  /** The command string the user submitted. */
+  command: string;
+
+  // ── Frozen at creation ─────────────────────────────────────────────────────
+  /** Shell binary path used when this block was created. */
+  shell: string;
+  /** Working directory at the time this block was created. */
+  cwd: string;
+  /** Git branch at the time this block was created. */
+  branch: string | null;
+
+  // ── Runtime state ──────────────────────────────────────────────────────────
+  status: BlockStatus;
+  /** Streamed output lines accumulated during execution. */
+  output: OutputLine[];
+
+  // ── Completion metadata (null until block completes) ───────────────────────
+  /** Process exit code. null while running or if process was killed before exit. */
+  exitCode: number | null;
+  /** Working directory after the command completed (from sentinel). */
+  finalCwd: string | null;
+  /** Git branch after the command completed (from sentinel). */
+  finalBranch: string | null;
+
+  /** Unix ms timestamp of block creation. */
+  createdAt: number;
+}
+
+// ─── Runtime Context ──────────────────────────────────────────────────────────
+
+/**
+ * Global runtime context for the notebook session.
+ * Only updated by completed (non-killed) blocks.
+ * Used to initialize the next block's frozen properties.
+ */
+export interface FlowContext {
+  cwd: string;
+  branch: string | null;
+  shell: string | null;
+  connection: "local" | "remote";
+}
+
+// ─── Document (persisted to disk on explicit save) ────────────────────────────
+
+/**
+ * The full notebook state serialised to the .flow file.
+ * Persistence is explicit and controlled — never triggered by streaming events.
+ * Blocks and runtimeContext are optional so new/empty files parse gracefully.
+ */
+export interface FlowDocument {
+  /** Saved block list. Populated on explicit save only. */
+  blocks?: FlowBlock[];
+  /** Saved runtime context. Populated on explicit save only. */
+  runtimeContext?: FlowContext;
+  /** Preferred shell path, persisted immediately on shell selection change. */
+  shell?: string;
+  /** Preferred starting cwd, persisted immediately on change. */
+  cwd?: string;
+  /** Preferred branch label, for display purposes only. */
+  branch?: string;
+}
+
+// ─── Shell Config ─────────────────────────────────────────────────────────────
+
+export type ShellProfile = {
+  id: string;
+  label: string;
+  command: string;
+  args: string[];
+  ignorePath?: string[];
+  icon?: string;
+};
+
+export type ResolvedShell = {
+  id: string;
+  label: string;
+  path: string;
+  /** Shell launch args, resolved and stored alongside the path. */
+  args: string[];
+  icon?: string;
+};
+
+// ─── Webview → Extension Messages ────────────────────────────────────────────
+
+export type WebviewMessage =
+  /** Request initial document state + live context from extension. */
+  | { type: "init" }
+  /** Explicit save: persist the full notebook state to disk. */
+  | { type: "update"; document: FlowDocument }
+  /** Request the list of available shells on this machine. */
+  | { type: "shellConfig" }
+  /** Forward a webview console log to the extension output channel. */
+  | { type: "log"; message: string }
+  /** Start executing a command in a new isolated shell process. */
+  | {
+      type: "execute";
+      blockId: string;
+      command: string;
+      /** Full path to the shell binary. */
+      shell: string;
+      /**
+       * Launch args for the shell binary, sourced from constant.ts via
+       * ShellResolver → ResolvedShell.args → webview → here.
+       * The engine appends the wrapped command as the final argument.
+       */
+      args: string[];
+      cwd: string;
+    }
+  /** Send user input to a running block's stdin. */
+  | { type: "input"; blockId: string; text: string }
+  /** Kill the process associated with a running block. */
+  | { type: "killBlock"; blockId: string };
+
+// ─── Extension → Webview Messages ────────────────────────────────────────────
+
+export type ExtMessage =
+  /** Initial state: saved document + live context (cwd, branch). */
+  | { type: "init"; document: FlowDocument; context: FlowContext }
+  /** Available shells resolved from the host machine. */
+  | { type: "shellList"; shells: ResolvedShell[] }
+  /** Streamed stdout/stderr lines from a running block. */
+  | { type: "stream"; blockId: string; lines: OutputLine[] }
+  /** Block process completed (done, error, or killed). */
+  | {
+      type: "blockComplete";
+      blockId: string;
+      exitCode: number | null;
+      finalCwd: string | null;
+      finalBranch: string | null;
+      status: "done" | "error" | "killed";
+    }
+  /** Block process failed to spawn or encountered an unrecoverable error. */
+  | { type: "blockError"; blockId: string; message: string };
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\utils\constant.ts
+import { ShellProfile } from "../types/MessageProtocol";
+
+export const shell: ShellProfile[] = [
+  {
+    id: "cmd",
+    label: "Command Prompt",
+    command: "cmd",
+    args: ["/d", "/s", "/c"],
+    icon: "codicon-terminal-cmd",
+  },
+  {
+    id: "powershell",
+    label: "PowerShell",
+    command: "powershell",
+    args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
+    icon: "codicon-terminal-powershell",
+  },
+  {
+    id: "pwsh",
+    label: "PowerShell Core",
+    command: "pwsh",
+    args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
+    icon: "codicon-terminal-powershell",
+  },
+  {
+    id: "bash",
+    label: "Bash",
+    command: "bash",
+    args: ["-c"],
+    icon: "codicon-terminal-bash",
+  },
+  {
+    id: "zsh",
+    label: "Zsh",
+    command: "zsh",
+    args: ["-c"],
+    icon: "codicon-terminal-bash",
+  },
+];
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\utils\helper.ts
+/**
+ * Generate a random ID for blocks or other entities
+ */
+export const generateId = () => Math.random().toString(36).substr(2, 9);
+
+/**
+ * Generate a cryptographically random nonce for CSP
+ */
+export function getNonce() {
+  let text = "";
+  const possible =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  for (let i = 0; i < 32; i++) {
+    text += possible.charAt(Math.floor(Math.random() * possible.length));
+  }
+  return text;
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\utils\logger.ts
+type VSCodeAPI = {
+  postMessage: (message: any) => void;
+};
+
+class Logger {
+  private prefix: string;
+  private vscode: VSCodeAPI | null = null;
+  private isWebview: boolean;
+
+  constructor(prefix: string) {
+    this.prefix = prefix;
+    this.isWebview = typeof window !== "undefined";
+  }
+
+  setVSCode(vscode: VSCodeAPI) {
+    this.vscode = vscode;
+  }
+
+  private format(level: string, message: string): string {
+    const time = new Date().toISOString().split("T")[1].slice(0, -5);
+    return `[${time}] ${this.prefix}:${level} ${message}`;
+  }
+
+  private log(
+    level: string,
+    method: "log" | "warn" | "error",
+    message: string,
+    ...args: any[]
+  ) {
+    const formatted = this.format(level, message);
+    console[method](formatted, ...args);
+
+    // Send webview logs to extension
+    if (this.isWebview && this.vscode) {
+      const argsStr = args.length > 0 ? " " + JSON.stringify(args) : "";
+      this.vscode.postMessage({
+        type: "log",
+        message: `${formatted}${argsStr}`,
+      });
+    }
+  }
+
+  info(message: string, ...args: any[]) {
+    this.log("INFO", "log", message, ...args);
+  }
+
+  warn(message: string, ...args: any[]) {
+    this.log("WARN", "warn", message, ...args);
+  }
+
+  error(message: string, ...args: any[]) {
+    this.log("ERROR", "error", message, ...args);
+  }
+}
+
+// Extension logger
+export const Ext = new Logger("EXT");
+
+// Webview logger
+export const Web = new Logger("WEB");
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\App.tsx
+// =============================================================================
+// App.tsx
+//
+// Root notebook application component.
+//
+// Wires all hooks together and passes props down to the InputSection and
+// per-block OutputBlock components. This is the single place where:
+//   - Document preferences (shell, cwd) are derived for the InputSection.
+//   - Block execution is initiated (createBlock → flowService.execute).
+//   - Explicit notebook saves are triggered (saveDocument).
+// =============================================================================
+
+import { useEffect, useRef, useCallback } from "react";
+import { useFlowDocument } from "./hooks/useFlowDocument";
+import { useShellConfig } from "./hooks/useShellConfig";
+import { useNotebook } from "./store/notebookStore";
+import { useBlockExecution } from "./hooks/useBlockExecution";
+import { InputSection } from "./components/input";
+import { OutputBlock } from "./components/block";
+import { flowService } from "./services/FlowService";
+import { FlowContext } from "../types/MessageProtocol";
+
+// ── CSS animations injected once into <head> ──────────────────────────────────
+const ANIM_CSS = `
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0; }
+}
+/* Show block toolbar on row hover or when it contains focus */
+.group:hover .block-toolbar,
+.block-toolbar:focus-within {
+  opacity: 1 !important;
+}
+`;
+
+export default function App() {
+  const {
+    document,
+    context: docContext,
+    updateDocument,
+    saveDocument,
+  } = useFlowDocument();
+  const { shells } = useShellConfig();
+
+  // ── Notebook store (source of truth for all block state) ──────────────────
+  const {
+    blocks,
+    runtimeContext,
+    createBlock,
+    appendOutput,
+    setBlockStatus,
+    completeBlock,
+    deleteBlock,
+    reRunBlock,
+    setRuntimeContext,
+    resetNotebook,
+  } = useNotebook(docContext, []);
+
+  // When the extension sends init, sync the runtimeContext and restore any
+  // previously saved blocks.
+  useEffect(() => {
+    setRuntimeContext(docContext);
+  }, [docContext, setRuntimeContext]);
+
+  // If the saved document contains blocks from a previous session, restore them.
+  useEffect(() => {
+    if (
+      document.blocks &&
+      document.blocks.length > 0 &&
+      document.runtimeContext
+    ) {
+      resetNotebook(document.blocks, document.runtimeContext);
+    } else if (docContext.cwd) {
+      setRuntimeContext(docContext);
+    }
+    // Run only once after docContext is first populated (empty cwd means not yet
+    // received from extension).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docContext.cwd]);
+
+  // ── Wire execution events from extension to notebookStore ─────────────────
+  useBlockExecution({ appendOutput, completeBlock, setBlockStatus });
+
+  // ── Inject CSS animations once ────────────────────────────────────────────
+  const styleInjected = useRef(false);
+  if (!styleInjected.current) {
+    styleInjected.current = true;
+    const style = window.document.createElement("style");
+    style.textContent = ANIM_CSS;
+    window.document.head.appendChild(style);
+  }
+
+  // ── Merged context for the InputSection ───────────────────────────────────
+  // Prefer runtime-detected values; fall back to document preferences.
+  const displayContext: FlowContext = {
+    cwd: runtimeContext.cwd || document.cwd || "",
+    branch: runtimeContext.branch ?? document.branch ?? null,
+    shell: document.shell ?? runtimeContext.shell ?? null,
+    connection: runtimeContext.connection ?? "local",
+  };
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+
+  const handleRun = (cmd: string) => {
+    const shell = displayContext.shell;
+    if (!shell) {
+      return;
+    }
+    // Look up the resolved shell to get its args (defined in constant.ts,
+    // resolved by ShellResolver, carried in ResolvedShell.args).
+    const resolvedShell = shells.find((s) => s.path === shell);
+    const shellArgs = resolvedShell?.args ?? [];
+
+    const blockId = createBlock(
+      cmd,
+      shell,
+      displayContext.cwd,
+      displayContext.branch ?? null,
+    );
+    flowService.execute(blockId, cmd, shell, shellArgs, displayContext.cwd);
+  };
+
+  const handleReRun = (blockId: string) => {
+    const orig = blocks.find((b) => b.id === blockId);
+    if (!orig) {
+      return;
+    }
+    // Resolve args from the shell list for the block's frozen shell path.
+    const resolvedShell = shells.find((s) => s.path === orig.shell);
+    const shellArgs = resolvedShell?.args ?? [];
+
+    const newId = reRunBlock(blockId);
+    if (!newId) {
+      return;
+    }
+    flowService.execute(newId, orig.command, orig.shell, shellArgs, orig.cwd);
+  };
+
+  const handleShellChange = (shellPath: string) => {
+    // Auto-persist the shell preference immediately
+    updateDocument((draft) => {
+      draft.shell = shellPath;
+    });
+  };
+
+  const handleCwdChange = (cwd: string) => {
+    // Auto-persist the cwd preference immediately
+    updateDocument((draft) => {
+      draft.cwd = cwd;
+    });
+  };
+
+  const handleSave = useCallback(() => {
+    saveDocument(blocks, runtimeContext);
+  }, [blocks, runtimeContext, saveDocument]);
+
+  // Global save shortcut (Ctrl+S / Cmd+S)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        handleSave();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [handleSave]);
+
+  const safeBlocks = Array.isArray(blocks) ? blocks : [];
+  const isAnyRunning = safeBlocks.some((b) => b.status === "running");
+
+  return (
+    <div
+      className="h-screen flex flex-col font-mono text-sm antialiased"
+      style={{
+        background: "var(--vscode-editor-background)",
+        color: "var(--vscode-editor-foreground)",
+        overflow: "hidden",
+      }}
+    >
+      <main className="flex-1 overflow-y-auto" style={{ padding: "12px 16px" }}>
+        {safeBlocks.length === 0 && (
+          <div
+            className="flex flex-col items-center justify-center h-full opacity-40"
+            style={{ color: "var(--vscode-descriptionForeground)" }}
+          >
+            <span
+              className="codicon codicon-terminal"
+              style={{ fontSize: "32px", marginBottom: "12px" }}
+            />
+            <div className="text-base mb-1">Flow Notebook</div>
+            <div className="text-xs">
+              Type a command below to create a block
+            </div>
+          </div>
+        )}
+
+        {[...safeBlocks]
+          .sort((a, b) => a.seq - b.seq)
+          .map((block, idx) => (
+            <div key={block.id}>
+              <OutputBlock
+                block={block}
+                onDelete={deleteBlock}
+                onReRun={handleReRun}
+              />
+              {idx < safeBlocks.length - 1 && (
+                <div
+                  style={{
+                    height: "1px",
+                    backgroundColor: "var(--vscode-panel-border)",
+                    opacity: 0.3,
+                    margin: "8px 2px",
+                  }}
+                />
+              )}
+            </div>
+          ))}
+
+        {/* Spacer above the input bar */}
+        <div style={{ height: "24px" }} />
+      </main>
+
+      {/* ── Input bar ── */}
+      <InputSection
+        context={displayContext}
+        availableShells={shells}
+        onShellChange={handleShellChange}
+        onCwdChange={handleCwdChange}
+        onRun={handleRun}
+        isRunning={isAnyRunning}
+      />
+    </div>
+  );
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\index.tsx
+import React from "react";
+import { createRoot } from "react-dom/client";
+import App from "./App";
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  ErrorBoundaryState
+> {
+  state: ErrorBoundaryState = { hasError: false, error: null };
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error("Error caught by ErrorBoundary:", error, errorInfo);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: "20px", color: "red" }}>
+          <h2>Something went wrong</h2>
+          {process.env.NODE_ENV === "development" && (
+            <pre>{this.state.error?.toString()}</pre>
+          )}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const root = createRoot(document.getElementById("root")!);
+root.render(
+  <ErrorBoundary>
+    <App />
+  </ErrorBoundary>,
+);
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\styles.css
+@import "tailwindcss";
+
+@layer base {
+  body {
+    margin: 0;
+    padding: 0;
+    color: var(--vscode-foreground);
+    background-color: var(--vscode-editor-background);
+    font-family: var(--vscode-font-family);
+    font-size: var(--vscode-font-size);
+    font-weight: var(--vscode-font-weight);
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--vscode-scrollbarSlider-background);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--vscode-scrollbarSlider-hoverBackground);
+  }
+
+  ::-webkit-scrollbar-thumb:active {
+    background-color: var(--vscode-scrollbarSlider-activeBackground);
+  }
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\ColorBlock.tsx
+import React from "react";
+
+interface ColorDef {
+  name: string;
+  category: string;
+  vscodeVar: string;
+}
+
+const colors: ColorDef[] = [
+  // --- Base ---
+  {
+    category: "Base",
+    name: "Editor Background",
+    vscodeVar: "--vscode-editor-background",
+  },
+  {
+    category: "Base",
+    name: "Editor Foreground",
+    vscodeVar: "--vscode-editor-foreground",
+  },
+  {
+    category: "Base",
+    name: "Widget Background",
+    vscodeVar: "--vscode-editorWidget-background",
+  },
+  {
+    category: "Base",
+    name: "Widget Border",
+    vscodeVar: "--vscode-editorWidget-border",
+  },
+
+  // --- Input ---
+  {
+    category: "Input",
+    name: "Input Background",
+    vscodeVar: "--vscode-input-background",
+  },
+  {
+    category: "Input",
+    name: "Input Foreground",
+    vscodeVar: "--vscode-input-foreground",
+  },
+  {
+    category: "Input",
+    name: "Placeholder",
+    vscodeVar: "--vscode-input-placeholderForeground",
+  },
+  {
+    category: "Input",
+    name: "Input Border",
+    vscodeVar: "--vscode-input-border",
+  },
+  {
+    category: "Input",
+    name: "Validation Info",
+    vscodeVar: "--vscode-inputValidation-infoBackground",
+  },
+  {
+    category: "Input",
+    name: "Validation Warning",
+    vscodeVar: "--vscode-inputValidation-warningBackground",
+  },
+  {
+    category: "Input",
+    name: "Validation Error",
+    vscodeVar: "--vscode-inputValidation-errorBackground",
+  },
+
+  // --- Buttons ---
+  {
+    category: "Button",
+    name: "Button Background",
+    vscodeVar: "--vscode-button-background",
+  },
+  {
+    category: "Button",
+    name: "Button Foreground",
+    vscodeVar: "--vscode-button-foreground",
+  },
+  {
+    category: "Button",
+    name: "Button Hover",
+    vscodeVar: "--vscode-button-hoverBackground",
+  },
+  {
+    category: "Button",
+    name: "Secondary Button",
+    vscodeVar: "--vscode-button-secondaryBackground",
+  },
+
+  // --- Lists & Menus ---
+  {
+    category: "List/Menu",
+    name: "List Hover",
+    vscodeVar: "--vscode-list-hoverBackground",
+  },
+  {
+    category: "List/Menu",
+    name: "List Active",
+    vscodeVar: "--vscode-list-activeSelectionBackground",
+  },
+  {
+    category: "List/Menu",
+    name: "Menu Background",
+    vscodeVar: "--vscode-menu-background",
+  },
+  {
+    category: "List/Menu",
+    name: "Menu Foreground",
+    vscodeVar: "--vscode-menu-foreground",
+  },
+  {
+    category: "List/Menu",
+    name: "Menu Selection",
+    vscodeVar: "--vscode-menu-selectionBackground",
+  },
+
+  // --- Status Bar ---
+  {
+    category: "Status Bar",
+    name: "Status Bar Bg",
+    vscodeVar: "--vscode-statusBar-background",
+  },
+  {
+    category: "Status Bar",
+    name: "Status Bar Fg",
+    vscodeVar: "--vscode-statusBar-foreground",
+  },
+  {
+    category: "Status Bar",
+    name: "Remote Bg",
+    vscodeVar: "--vscode-statusBarItem-remoteBackground",
+  },
+  {
+    category: "Status Bar",
+    name: "Error Bg",
+    vscodeVar: "--vscode-statusBarItem-errorBackground",
+  },
+
+  // --- Terminal ---
+  {
+    category: "Terminal",
+    name: "Terminal Background",
+    vscodeVar: "--vscode-terminal-background",
+  },
+  {
+    category: "Terminal",
+    name: "Terminal Foreground",
+    vscodeVar: "--vscode-terminal-foreground",
+  },
+  {
+    category: "Terminal",
+    name: "Ansi Green",
+    vscodeVar: "--vscode-terminal-ansiGreen",
+  },
+  {
+    category: "Terminal",
+    name: "Ansi Blue",
+    vscodeVar: "--vscode-terminal-ansiBlue",
+  },
+  {
+    category: "Terminal",
+    name: "Ansi Red",
+    vscodeVar: "--vscode-terminal-ansiRed",
+  },
+  {
+    category: "Terminal",
+    name: "Ansi Yellow",
+    vscodeVar: "--vscode-terminal-ansiYellow",
+  },
+
+  // --- Badges ---
+  {
+    category: "Badge",
+    name: "Badge Background",
+    vscodeVar: "--vscode-badge-background",
+  },
+  {
+    category: "Badge",
+    name: "Badge Foreground",
+    vscodeVar: "--vscode-badge-foreground",
+  },
+
+  // --- Panel/SideBar ---
+  {
+    category: "Panel",
+    name: "Panel Border",
+    vscodeVar: "--vscode-panel-border",
+  },
+  {
+    category: "Panel",
+    name: "Sidebar Bg",
+    vscodeVar: "--vscode-sideBar-background",
+  },
+  {
+    category: "Panel",
+    name: "Activity Bar Bg",
+    vscodeVar: "--vscode-activityBar-background",
+  },
+
+  // --- Editor ---
+  {
+    category: "Editor",
+    name: "Selection",
+    vscodeVar: "--vscode-editor-selectionBackground",
+  },
+  {
+    category: "Editor",
+    name: "Cursor",
+    vscodeVar: "--vscode-editorCursor-foreground",
+  },
+  {
+    category: "Editor",
+    name: "Line Highlight",
+    vscodeVar: "--vscode-editor-lineHighlightBackground",
+  },
+];
+
+const groupedColors = colors.reduce(
+  (acc, color) => {
+    if (!acc[color.category]) {
+      acc[color.category] = [];
+    }
+    acc[color.category].push(color);
+    return acc;
+  },
+  {} as Record<string, ColorDef[]>,
+);
+
+const categories = Object.keys(groupedColors);
+
+export const ColorBlock: React.FC = () => {
+  return (
+    <div
+      className="p-6 w-full font-mono"
+      style={{
+        backgroundColor: "var(--vscode-editor-background)",
+        color: "var(--vscode-editor-foreground)",
+      }}
+    >
+      <div className="mb-6">
+        <h2 className="text-xl font-bold mb-2">VSCode Theme Variables</h2>
+        <p
+          className="text-sm"
+          style={{ color: "var(--vscode-descriptionForeground)" }}
+        >
+          Visual reference of available theme variables mapped in Tailwind.
+        </p>
+      </div>
+
+      {categories.map((category) => (
+        <div key={category} className="mb-8">
+          <h3
+            className="text-base font-bold mb-3 pb-2 border-b"
+            style={{ color: "var(--vscode-foreground)" }}
+          >
+            {category}
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {groupedColors[category].map((color, idx) => (
+              <div
+                key={idx}
+                className="flex flex-col border rounded overflow-hidden"
+                style={{
+                  borderColor: "var(--vscode-panel-border)",
+                  backgroundColor: "var(--vscode-widget)",
+                }}
+              >
+                {/* Color Preview */}
+                <div
+                  className="h-12 w-full"
+                  style={{
+                    backgroundColor: `var(${color.vscodeVar})`,
+                  }}
+                />
+
+                {/* Details */}
+                <div className="p-3 space-y-1">
+                  <div
+                    className="font-medium text-xs truncate"
+                    title={color.name}
+                  >
+                    {color.name}
+                  </div>
+                  <code
+                    className="text-[10px] block truncate select-all"
+                    title={color.vscodeVar}
+                    style={{ color: "var(--vscode-descriptionForeground)" }}
+                  >
+                    {color.vscodeVar}
+                  </code>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+export default ColorBlock;
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\InputBlock.tsx
+import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+import { FlowContext, ResolvedShell } from "../../types/MessageProtocol";
+import { Web } from "../../utils/logger";
+import { Tooltip } from "./Tooltip";
+
+interface InputSectionProps {
+  context: FlowContext;
+  onRun: (cmd: string) => void;
+  onShellChange: (shell: string) => void;
+  onCwdChange?: (cwd: string) => void;
+  availableShells: ResolvedShell[];
+  isRunning?: boolean;
+}
+
+export const InputSection: React.FC<InputSectionProps> = ({
+  context,
+  onRun,
+  onShellChange,
+  onCwdChange,
+  availableShells,
+  isRunning = false,
+}) => {
+  const [input, setInput] = useState("");
+  const [showShellMenu, setShowShellMenu] = useState(false);
+  const [menuPosition, setMenuPosition] = useState({
+    top: 0,
+    left: 0,
+    bottom: 0,
+  });
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        showShellMenu &&
+        menuRef.current &&
+        !menuRef.current.contains(event.target as Node) &&
+        buttonRef.current &&
+        !buttonRef.current.contains(event.target as Node)
+      ) {
+        setShowShellMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showShellMenu]);
+
+  const handleRun = () => {
+    if (input.trim() && !isRunning) {
+      onRun(input);
+      setInput("");
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleRun();
+    }
+  };
+
+  const getShellName = (path: string) => {
+    if (!path) return "";
+    const lowerPath = path.toLowerCase().replace(/\\/g, "/");
+    const fileName = lowerPath.split("/").pop() || "";
+    return fileName.replace(/.*-/, "").replace(/\.exe$/, "");
+  };
+
+  const getShellDisplay = () => {
+    if (!context.shell) return "No Shell";
+    const shellObj = availableShells.find((s) => s.path === context.shell);
+    return shellObj ? shellObj.label : getShellName(context.shell);
+  };
+
+  const toggleMenu = () => {
+    if (!showShellMenu && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setMenuPosition({
+        top: rect.top,
+        left: rect.left,
+        bottom: window.innerHeight - rect.top, // Calculate bottom position for "dropup" effect if needed, or simply use rect.bottom for dropdown
+      });
+    }
+    setShowShellMenu(!showShellMenu);
+  };
+
+  return (
+    <div
+      style={{
+        backgroundColor: "var(--vscode-editor-background)",
+        borderTop: "1px solid var(--vscode-panel-border)",
+      }}
+      className="p-4 shrink-0 relative"
+    >
+      <div
+        style={{
+          backgroundColor: "var(--vscode-input-background)",
+          border: "1px solid var(--vscode-panel-border)",
+        }}
+        className="flex flex-col rounded-sm transition-all duration-100 overflow-hidden"
+        onFocus={(e) => {
+          e.currentTarget.style.borderColor = "var(--vscode-focusBorder)";
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = "var(--vscode-panel-border)";
+        }}
+      >
+        {/* Context Bar */}
+        <div
+          style={{
+            backgroundColor: "var(--vscode-editorWidget-background)",
+            borderBottom: "1px solid var(--vscode-panel-border)",
+            color: "var(--vscode-descriptionForeground)",
+          }}
+          className="flex items-center rounded-t-sm gap-2 text-xs px-3 py-1.5 select-none font-mono"
+        >
+          <span
+            style={{ color: "var(--vscode-button-background)" }}
+            className="font-bold"
+          >
+            [{context.connection}]
+          </span>
+          <div className="flex items-center gap-1">
+            <span
+              className="codicon codicon-git-branch"
+              style={{ fontSize: "14px" }}
+            />
+            <span>{context.branch || "no branch"}</span>
+          </div>
+          <Tooltip content="Copy path (Ctrl + Click)">
+            <div
+              className="flex items-center gap-1 group/cwd cursor-pointer"
+              onClick={(e) => {
+                if (e.ctrlKey) {
+                  navigator.clipboard.writeText(context.cwd);
+                } else {
+                  onCwdChange && onCwdChange(context.cwd);
+                }
+              }}
+            >
+              <span
+                className="codicon codicon-folder-opened group-hover/cwd:text-(--vscode-button-background) transition-colors"
+                style={{ fontSize: "14px" }}
+              />
+              <span
+                style={{ color: "var(--vscode-button-background)" }}
+                className="truncate max-w-[300px] group-hover/cwd:underline"
+              >
+                {context.cwd}
+              </span>
+            </div>
+          </Tooltip>
+        </div>
+
+        {/* Input Area */}
+        <div
+          style={{ backgroundColor: "var(--vscode-input-background)" }}
+          className="flex items-center rounded-b-sm"
+        >
+          <div className="relative">
+            <div
+              style={{ borderRight: "1px solid var(--vscode-panel-border)" }}
+              className="flex items-center shrink-0"
+            >
+              <button
+                ref={buttonRef}
+                onClick={toggleMenu}
+                disabled={isRunning}
+                style={{
+                  color: "var(--vscode-input-foreground)",
+                }}
+                className="flex items-center gap-1.5 px-3 py-2 transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+                onMouseEnter={(e) => {
+                  if (!isRunning) {
+                    e.currentTarget.style.backgroundColor =
+                      "var(--vscode-list-hoverBackground)";
+                    e.currentTarget.style.color =
+                      "var(--vscode-editor-foreground)";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color =
+                    "var(--vscode-input-foreground)";
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  {availableShells.length === 0 ? (
+                    <>
+                      <div
+                        style={{
+                          backgroundColor: "var(--vscode-icon-foreground)",
+                        }}
+                        className="w-3 h-3 rounded-full opacity-20 animate-pulse"
+                      />
+                      <div
+                        style={{
+                          backgroundColor: "var(--vscode-icon-foreground)",
+                        }}
+                        className="w-12 h-3 rounded opacity-20 animate-pulse"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <span
+                        className={`codicon ${
+                          availableShells.find((s) => s.path === context.shell)
+                            ?.icon || "codicon-terminal"
+                        }`}
+                        style={{ fontSize: "16px" }}
+                      />
+                      <span className="text-[11px] font-bold tracking-tight lowercase max-w-[100px] truncate font-mono">
+                        {getShellDisplay()}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <span
+                  className="codicon codicon-chevron-down transition-colors group-hover:text-(--vscode-editor-foreground)"
+                  style={{
+                    fontSize: "14px",
+                    color: "var(--vscode-descriptionForeground)",
+                  }}
+                />
+              </button>
+            </div>
+
+            {/* Shell Dropdown - Portal */}
+            {showShellMenu &&
+              createPortal(
+                <div
+                  ref={menuRef}
+                  style={{
+                    position: "fixed",
+                    bottom: menuPosition.bottom + 4, // Opening upwards based on bottom calculation
+                    left: menuPosition.left,
+                    backgroundColor: "var(--vscode-menu-background)",
+                    border: "1px solid var(--vscode-menu-border)",
+                    boxShadow: "0 2px 8px var(--vscode-widget-shadow)",
+                    zIndex: 9999,
+                    maxHeight: "320px",
+                    overflowY: "auto",
+                    minWidth: "280px",
+                  }}
+                  className="rounded-sm py-1"
+                >
+                  {availableShells.map((option) => {
+                    const isSelected = context.shell === option.path;
+                    return (
+                      <Tooltip
+                        key={option.path}
+                        content={option.path}
+                        className="block w-full"
+                      >
+                        <button
+                          onClick={() => {
+                            Web.info(
+                              `[InputSection] Selected shell: ${option.label} -> ${option.path}`,
+                            );
+                            onShellChange(option.path);
+                            setShowShellMenu(false);
+                          }}
+                          style={{
+                            color: "var(--vscode-menu-foreground)",
+                            height: "25px",
+                          }}
+                          className="vscode-menu-item flex items-center w-full px-2 text-[13px] text-left border-none outline-none cursor-pointer transition-colors hover:bg-(--vscode-menu-selectionBackground) hover:text-(--vscode-menu-selectionForeground)"
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "var(--vscode-menu-selectionBackground)";
+                            e.currentTarget.style.color =
+                              "var(--vscode-menu-selectionForeground)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                            e.currentTarget.style.color =
+                              "var(--vscode-menu-foreground)";
+                          }}
+                        >
+                          {/* Checkmark */}
+                          <div
+                            className="flex items-center justify-center shrink-0"
+                            style={{
+                              width: "16px",
+                              height: "16px",
+                              marginRight: "4px",
+                              opacity: isSelected ? 1 : 0,
+                            }}
+                          >
+                            <span className="codicon codicon-check" />
+                          </div>
+                          {/* Shell Icon */}
+                          <div
+                            className="flex items-center justify-center shrink-0"
+                            style={{
+                              width: "16px",
+                              height: "16px",
+                              marginRight: "8px",
+                            }}
+                          >
+                            <span
+                              className={`codicon ${
+                                option.icon || "codicon-terminal"
+                              }`}
+                            />
+                          </div>
+                          {/* Label */}
+                          <span className="flex-1 truncate font-mono">
+                            {option.label}
+                          </span>
+                        </button>
+                      </Tooltip>
+                    );
+                  })}
+                </div>,
+                document.body,
+              )}
+          </div>
+
+          <div className="flex-1 flex items-center gap-2 px-3 py-2">
+            <span
+              style={{ color: "var(--vscode-button-background)" }}
+              className="font-bold"
+            >
+              $
+            </span>
+            <input
+              ref={inputRef}
+              autoFocus
+              disabled={isRunning}
+              style={{
+                backgroundColor: "transparent",
+                color: "var(--vscode-editor-foreground)",
+                caretColor: "var(--vscode-editorCursor-foreground)",
+              }}
+              className="flex-1 border-none p-0 focus:ring-0 placeholder-(--vscode-input-placeholderForeground) selection:bg-(--vscode-editor-selectionBackground) font-mono text-sm leading-6 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+              placeholder={isRunning ? "Running..." : "Type a command..."}
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+            <button
+              onClick={handleRun}
+              disabled={!input.trim() || isRunning}
+              style={{
+                color: "var(--vscode-button-background)",
+              }}
+              className="rounded p-1 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              onMouseEnter={(e) => {
+                if (input.trim() && !isRunning) {
+                  e.currentTarget.style.color =
+                    "var(--vscode-button-foreground)";
+                  e.currentTarget.style.backgroundColor =
+                    "rgba(255,255,255,0.05)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = "var(--vscode-button-background)";
+                e.currentTarget.style.backgroundColor = "transparent";
+              }}
+            >
+              <span
+                className="codicon codicon-arrow-right"
+                style={{ fontSize: "18px" }}
+              />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\OutputBlock.tsx
+// =============================================================================
+// OutputBlock.tsx
+//
+// Rich notebook block component that renders the full output of an executed
+// command block, along with toolbar actions, per-block stdin, and search.
+//
+// Sub-components (all local to this file for locality):
+//   StatusIcon     — spinner / check / error / slash icons
+//   ToolbarButton  — icon button with hover + active state
+//   ContextMenu    — right-click menu (copy, re-run, kill, delete)
+//   MenuItem / MenuDivider
+//   BlockInput     — active stdin input shown only while block is running
+//   SearchBar      — text search input with match count
+//   OutputArea     — ANSI-rendered output with search highlight
+//   OutputBlock    — main container component
+// =============================================================================
+
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useCallback,
+  forwardRef,
+} from "react";
+import Ansi from "ansi-to-react";
+import { FlowBlock } from "../../types/MessageProtocol";
+import { flowService } from "../services/FlowService";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatDate(ts: number): string {
+  return new Date(ts).toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  });
+}
+
+function shortenPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+// ─── StatusIcon ───────────────────────────────────────────────────────────────
+
+function StatusIcon({ status }: { status: FlowBlock["status"] }) {
+  if (status === "running") {
+    return (
+      <span
+        className="codicon codicon-loading"
+        style={{
+          fontSize: "14px",
+          color: "var(--vscode-progressBar-background)",
+          animation: "spin 2s linear infinite",
+        }}
+      />
+    );
+  }
+  if (status === "done") {
+    return (
+      <span
+        className="codicon codicon-check"
+        style={{ fontSize: "14px", color: "var(--vscode-testing-iconPassed)" }}
+      />
+    );
+  }
+  if (status === "error") {
+    return (
+      <span
+        className="codicon codicon-error"
+        style={{ fontSize: "14px", color: "var(--vscode-testing-iconFailed)" }}
+      />
+    );
+  }
+  if (status === "killed") {
+    return (
+      <span
+        className="codicon codicon-circle-slash"
+        style={{ fontSize: "14px", color: "var(--vscode-disabledForeground)" }}
+      />
+    );
+  }
+  return null;
+}
+
+// ─── ToolbarButton ────────────────────────────────────────────────────────────
+
+interface ToolbarButtonProps {
+  icon: string;
+  title: string;
+  active?: boolean;
+  onClick: () => void;
+}
+
+const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(
+  ({ icon, title, active, onClick }, ref) => (
+    <button
+      ref={ref}
+      title={title}
+      onClick={onClick}
+      style={{
+        background: active
+          ? "var(--vscode-toolbar-activeBackground)"
+          : "transparent",
+        border: "none",
+        cursor: "pointer",
+        color: "var(--vscode-icon-foreground)",
+        padding: "3px 4px",
+        borderRadius: "3px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.backgroundColor =
+          "var(--vscode-toolbar-hoverBackground)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = active
+          ? "var(--vscode-toolbar-activeBackground)"
+          : "transparent";
+      }}
+    >
+      <span className={`codicon ${icon}`} style={{ fontSize: "14px" }} />
+    </button>
+  ),
+);
+ToolbarButton.displayName = "ToolbarButton";
+
+// ─── MenuItem & MenuDivider ───────────────────────────────────────────────────
+
+function MenuItem({
+  icon,
+  label,
+  danger,
+  disabled,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        padding: "6px 12px",
+        background: "transparent",
+        border: "none",
+        cursor: disabled ? "not-allowed" : "pointer",
+        color: danger
+          ? "var(--vscode-errorForeground)"
+          : "var(--vscode-menu-foreground)",
+        fontSize: "12px",
+        fontFamily: "inherit",
+        opacity: disabled ? 0.4 : 1,
+        textAlign: "left",
+      }}
+      onMouseEnter={(e) => {
+        if (!disabled) {
+          e.currentTarget.style.backgroundColor =
+            "var(--vscode-menu-selectionBackground)";
+          e.currentTarget.style.color =
+            "var(--vscode-menu-selectionForeground)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = "transparent";
+        e.currentTarget.style.color = danger
+          ? "var(--vscode-errorForeground)"
+          : "var(--vscode-menu-foreground)";
+      }}
+    >
+      <span className={`codicon ${icon}`} style={{ fontSize: "13px" }} />
+      {label}
+    </button>
+  );
+}
+
+function MenuDivider() {
+  return (
+    <div
+      style={{
+        height: "1px",
+        margin: "2px 8px",
+        backgroundColor:
+          "var(--vscode-menu-separatorBackground, var(--vscode-panel-border))",
+      }}
+    />
+  );
+}
+
+// ─── ContextMenu ──────────────────────────────────────────────────────────────
+
+interface ContextMenuProps {
+  block: FlowBlock;
+  onCopyOutput: () => void;
+  onReRun: () => void;
+  onKill: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}
+
+function ContextMenu({
+  block,
+  onCopyOutput,
+  onReRun,
+  onKill,
+  onDelete,
+  onClose,
+}: ContextMenuProps) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        onClose();
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "absolute",
+        top: "100%",
+        right: 0,
+        marginTop: "4px",
+        backgroundColor: "var(--vscode-menu-background)",
+        border: "1px solid var(--vscode-menu-border)",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+        zIndex: 100,
+        minWidth: "180px",
+        borderRadius: "4px",
+        overflow: "hidden",
+      }}
+    >
+      <MenuItem
+        icon="codicon-copy"
+        label="Copy Output"
+        onClick={onCopyOutput}
+      />
+      <MenuItem icon="codicon-refresh" label="Re-run" onClick={onReRun} />
+      <MenuDivider />
+      <MenuItem
+        icon="codicon-circle-slash"
+        label="Kill Process"
+        disabled={block.status !== "running"}
+        danger
+        onClick={onKill}
+      />
+      <MenuDivider />
+      <MenuItem
+        icon="codicon-trash"
+        label="Delete Block"
+        danger
+        onClick={onDelete}
+      />
+    </div>
+  );
+}
+
+// ─── BlockInput (per-block stdin) ─────────────────────────────────────────────
+
+function BlockInput({ blockId }: { blockId: string }) {
+  const [value, setValue] = useState("");
+
+  const handleSend = () => {
+    const text = value.trim();
+    if (!text) {
+      return;
+    }
+    flowService.sendInput(blockId, text);
+    setValue("");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        marginTop: "8px",
+        paddingTop: "8px",
+        borderTop: "1px solid var(--vscode-panel-border)",
+      }}
+    >
+      <span
+        style={{
+          color: "var(--vscode-button-background)",
+          fontWeight: "bold",
+        }}
+      >
+        &gt;
+      </span>
+      <input
+        autoFocus
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Send input to process…"
+        style={{
+          flex: 1,
+          background: "transparent",
+          border: "none",
+          outline: "none",
+          color: "var(--vscode-editor-foreground)",
+          caretColor: "var(--vscode-editorCursor-foreground)",
+          fontFamily: "inherit",
+          fontSize: "12px",
+        }}
+      />
+      <button
+        onClick={handleSend}
+        disabled={!value.trim()}
+        style={{
+          background: "transparent",
+          border: "none",
+          cursor: value.trim() ? "pointer" : "not-allowed",
+          color: value.trim()
+            ? "var(--vscode-button-background)"
+            : "var(--vscode-disabledForeground)",
+          padding: "2px 4px",
+        }}
+      >
+        <span className="codicon codicon-send" style={{ fontSize: "14px" }} />
+      </button>
+    </div>
+  );
+}
+
+// ─── SearchBar ────────────────────────────────────────────────────────────────
+
+function SearchBar({
+  query,
+  onChange,
+  matchCount,
+  onClose,
+}: {
+  query: string;
+  onChange: (q: string) => void;
+  matchCount: number;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        padding: "4px 6px",
+        backgroundColor: "var(--vscode-editorWidget-background)",
+        border: "1px solid var(--vscode-panel-border)",
+        borderRadius: "4px",
+        marginBottom: "8px",
+      }}
+    >
+      <span
+        className="codicon codicon-search"
+        style={{ fontSize: "12px", opacity: 0.6 }}
+      />
+      <input
+        autoFocus
+        type="text"
+        value={query}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Search output…"
+        style={{
+          flex: 1,
+          background: "transparent",
+          border: "none",
+          outline: "none",
+          color: "var(--vscode-editor-foreground)",
+          fontFamily: "inherit",
+          fontSize: "12px",
+        }}
+      />
+      {query && (
+        <span
+          style={{
+            fontSize: "10px",
+            color: "var(--vscode-descriptionForeground)",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {matchCount} match{matchCount !== 1 ? "es" : ""}
+        </span>
+      )}
+      <button
+        onClick={onClose}
+        style={{
+          background: "transparent",
+          border: "none",
+          cursor: "pointer",
+          color: "var(--vscode-icon-foreground)",
+          padding: "0 2px",
+        }}
+      >
+        <span className="codicon codicon-close" style={{ fontSize: "12px" }} />
+      </button>
+    </div>
+  );
+}
+
+// ─── OutputArea ───────────────────────────────────────────────────────────────
+
+function OutputArea({
+  block,
+  searchQuery,
+}: {
+  block: FlowBlock;
+  searchQuery: string;
+}) {
+  if (block.output.length === 0) {
+    if (block.status === "running") {
+      return (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            opacity: 0.5,
+            paddingLeft: "8px",
+            marginTop: "8px",
+            fontSize: "12px",
+          }}
+        >
+          <span
+            className="codicon codicon-loading"
+            style={{ fontSize: "12px", animation: "spin 1.5s linear infinite" }}
+          />
+          <span>Waiting for output…</span>
+        </div>
+      );
+    }
+    if (block.status === "done") {
+      return (
+        <div
+          style={{
+            opacity: 0.4,
+            paddingLeft: "8px",
+            marginTop: "8px",
+            fontSize: "12px",
+            fontStyle: "italic",
+          }}
+        >
+          (no output)
+        </div>
+      );
+    }
+    return null;
+  }
+
+  const lowerQuery = searchQuery.toLowerCase();
+
+  return (
+    <div
+      style={{
+        marginTop: "8px",
+        paddingLeft: "8px",
+        borderLeft: "2px solid var(--vscode-panel-border)",
+        fontFamily:
+          "var(--vscode-editor-font-family, 'JetBrains Mono', monospace)",
+        fontSize: "12px",
+        lineHeight: "1.5",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-all",
+      }}
+    >
+      {block.output.map((line, i) => {
+        const isMatch =
+          lowerQuery !== "" && line.text.toLowerCase().includes(lowerQuery);
+
+        const color =
+          line.type === "stderr"
+            ? "var(--vscode-testing-message-error-lineBackground, #f44747)"
+            : line.type === "stdin"
+              ? "var(--vscode-button-background)"
+              : "var(--vscode-editor-foreground)";
+
+        return (
+          <div
+            key={i}
+            style={{
+              color,
+              backgroundColor: isMatch ? "rgba(255,197,0,0.15)" : "transparent",
+              borderRadius: isMatch ? "2px" : undefined,
+            }}
+          >
+            {line.type === "stdin" ? (
+              <span>
+                <span style={{ opacity: 0.6 }}>&gt; </span>
+                {line.text}
+              </span>
+            ) : (
+              <Ansi>{line.text}</Ansi>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── OutputBlock (main) ───────────────────────────────────────────────────────
+
+export interface OutputBlockProps {
+  block: FlowBlock;
+  onDelete: (id: string) => void;
+  onReRun: (id: string) => void;
+}
+
+export const OutputBlock: React.FC<OutputBlockProps> = ({
+  block,
+  onDelete,
+  onReRun,
+}) => {
+  const [showMenu, setShowMenu] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  const isRunning = block.status === "running";
+
+  const searchMatchCount = searchQuery
+    ? block.output.filter((l) =>
+        l.text.toLowerCase().includes(searchQuery.toLowerCase()),
+      ).length
+    : 0;
+
+  const handleCopyOutput = useCallback(() => {
+    const text = block.output.map((l) => l.text).join("\n");
+    navigator.clipboard.writeText(text).catch(() => {});
+    setShowMenu(false);
+  }, [block.output]);
+
+  const handleReRun = useCallback(() => {
+    onReRun(block.id);
+    setShowMenu(false);
+  }, [block.id, onReRun]);
+
+  const handleKill = useCallback(() => {
+    flowService.killBlock(block.id);
+    setShowMenu(false);
+  }, [block.id]);
+
+  const handleDelete = useCallback(() => {
+    onDelete(block.id);
+    setShowMenu(false);
+  }, [block.id, onDelete]);
+
+  // ── Container styling changes with execution status ──
+  const containerStyle: React.CSSProperties = {
+    position: "relative",
+    borderRadius: "6px",
+    padding: "10px 12px",
+    marginBottom: "2px",
+    border: isRunning
+      ? "1px solid var(--vscode-progressBar-background, #007acc)"
+      : "1px solid transparent",
+    backgroundColor: isRunning ? "rgba(0, 122, 204, 0.04)" : "transparent",
+    transition: "border-color 0.15s, background-color 0.15s",
+  };
+
+  // Running left accent stripe
+  const leftAccentStyle: React.CSSProperties | undefined = isRunning
+    ? {
+        position: "absolute",
+        left: 0,
+        top: "10px",
+        bottom: "10px",
+        width: "2px",
+        borderRadius: "2px",
+        backgroundColor: "var(--vscode-progressBar-background, #007acc)",
+      }
+    : undefined;
+
+  const indent = isRunning ? "10px" : undefined;
+
+  return (
+    <div
+      className="group"
+      style={containerStyle}
+      onMouseEnter={(e) => {
+        if (!isRunning) {
+          e.currentTarget.style.backgroundColor =
+            "var(--vscode-list-hoverBackground)";
+          e.currentTarget.style.borderColor = "var(--vscode-panel-border)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isRunning) {
+          e.currentTarget.style.backgroundColor = "transparent";
+          e.currentTarget.style.borderColor = "transparent";
+        }
+      }}
+    >
+      {/* Running accent stripe */}
+      {leftAccentStyle && <div style={leftAccentStyle} />}
+
+      {/* ── Toolbar (top-right, visible on hover or while running) ── */}
+      <div
+        className="block-toolbar"
+        style={{
+          position: "absolute",
+          top: "8px",
+          right: "8px",
+          display: "flex",
+          alignItems: "center",
+          gap: "2px",
+          zIndex: 10,
+          backgroundColor: "var(--vscode-editorWidget-background)",
+          border: "1px solid var(--vscode-panel-border)",
+          borderRadius: "4px",
+          padding: "2px",
+          opacity: isRunning ? 1 : 0,
+        }}
+      >
+        <ToolbarButton
+          icon="codicon-search"
+          title="Search output"
+          active={showSearch}
+          onClick={() => setShowSearch((s) => !s)}
+        />
+        <ToolbarButton
+          icon="codicon-refresh"
+          title="Re-run"
+          onClick={handleReRun}
+        />
+        <ToolbarButton
+          icon="codicon-trash"
+          title="Delete"
+          onClick={handleDelete}
+        />
+        <div
+          style={{
+            width: "1px",
+            height: "16px",
+            backgroundColor: "var(--vscode-panel-border)",
+            margin: "0 2px",
+          }}
+        />
+        <div style={{ position: "relative" }}>
+          <ToolbarButton
+            ref={menuButtonRef}
+            icon="codicon-ellipsis"
+            title="More actions"
+            active={showMenu}
+            onClick={() => setShowMenu((m) => !m)}
+          />
+          {showMenu && (
+            <ContextMenu
+              block={block}
+              onCopyOutput={handleCopyOutput}
+              onReRun={handleReRun}
+              onKill={handleKill}
+              onDelete={handleDelete}
+              onClose={() => setShowMenu(false)}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* ── Header ── */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          fontSize: "11px",
+          color: "var(--vscode-descriptionForeground)",
+          marginBottom: "6px",
+          userSelect: "none",
+          paddingLeft: indent,
+        }}
+      >
+        <span style={{ fontWeight: "bold", opacity: 0.7 }}>#{block.seq}</span>
+        <StatusIcon status={block.status} />
+        {isRunning ? (
+          <span
+            style={{
+              color: "var(--vscode-progressBar-background)",
+              fontWeight: 600,
+            }}
+          >
+            Running
+          </span>
+        ) : (
+          <span>{formatDate(block.createdAt)}</span>
+        )}
+      </div>
+
+      {/* ── Command row ── */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "4px 8px",
+          fontWeight: 500,
+          paddingLeft: indent,
+        }}
+      >
+        <span
+          style={{
+            color: "var(--vscode-button-background)",
+            fontWeight: "bold",
+          }}
+        >
+          [local]
+        </span>
+        {block.branch && (
+          <>
+            <span
+              className="codicon codicon-git-branch"
+              style={{ fontSize: "14px", opacity: 0.6 }}
+            />
+            <span style={{ color: "var(--vscode-descriptionForeground)" }}>
+              {block.branch}
+            </span>
+          </>
+        )}
+        <span
+          className="codicon codicon-folder-opened"
+          style={{ fontSize: "14px", opacity: 0.6 }}
+        />
+        <span
+          style={{ color: "var(--vscode-button-background)" }}
+          title={block.cwd}
+        >
+          {shortenPath(block.cwd)}
+        </span>
+        <span
+          style={{
+            color: "var(--vscode-button-background)",
+            fontWeight: "bold",
+          }}
+        >
+          $
+        </span>
+        <span style={{ color: "var(--vscode-editor-foreground)" }}>
+          {block.command}
+        </span>
+        {isRunning && (
+          <span
+            style={{
+              display: "inline-block",
+              width: "8px",
+              height: "14px",
+              backgroundColor: "var(--vscode-editor-foreground)",
+              opacity: 0.5,
+              animation: "blink 1s step-start infinite",
+            }}
+          />
+        )}
+      </div>
+
+      {/* ── Search bar ── */}
+      {showSearch && (
+        <div style={{ marginTop: "8px", paddingLeft: indent }}>
+          <SearchBar
+            query={searchQuery}
+            onChange={setSearchQuery}
+            matchCount={searchMatchCount}
+            onClose={() => {
+              setShowSearch(false);
+              setSearchQuery("");
+            }}
+          />
+        </div>
+      )}
+
+      {/* ── Output ── */}
+      <div style={{ paddingLeft: indent }}>
+        <OutputArea block={block} searchQuery={searchQuery} />
+      </div>
+
+      {/* ── Per-block stdin (running only) ── */}
+      {isRunning && (
+        <div style={{ paddingLeft: indent }}>
+          <BlockInput blockId={block.id} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default OutputBlock;
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\Tooltip.tsx
+import React, { useState, useRef, useEffect } from "react";
+import { createPortal } from "react-dom";
+
+interface TooltipProps {
+  content: React.ReactNode;
+  children: React.ReactNode;
+  delay?: number;
+  className?: string;
+}
+
+export const Tooltip: React.FC<TooltipProps> = ({
+  content,
+  children,
+  delay = 350,
+  className = "inline-block",
+}) => {
+  const [isVisible, setIsVisible] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const timeoutRef = useRef<any>(null);
+
+  const handleMouseEnter = () => {
+    timeoutRef.current = setTimeout(() => {
+      if (triggerRef.current) {
+        const rect = triggerRef.current.getBoundingClientRect();
+        const spaceAbove = rect.top;
+        const tooltipHeight = 40; // Approximate
+        const placeAbove = spaceAbove > tooltipHeight + 10;
+
+        setPosition({
+          top: placeAbove ? rect.top - 36 : rect.bottom + 6,
+          left: rect.left + rect.width / 2,
+        });
+        setIsVisible(true);
+      }
+    }, delay);
+  };
+
+  const handleMouseLeave = () => {
+    if (timeoutRef.current) {
+      clearTimeout(timeoutRef.current);
+    }
+    setIsVisible(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
+
+  return (
+    <>
+      <div
+        ref={triggerRef}
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={handleMouseLeave}
+        className={className}
+      >
+        {children}
+      </div>
+      {isVisible &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              top: position.top,
+              left: position.left,
+              transform: "translateX(-10%)",
+              backgroundColor: "var(--vscode-editorHoverWidget-background)",
+              color: "var(--vscode-editorHoverWidget-foreground)",
+              border: "1px solid var(--vscode-editorHoverWidget-border)",
+              borderRadius: "4px",
+              padding: "4px 8px",
+              fontSize: "12px",
+              zIndex: 10000,
+              boxShadow: "0 2px 8px rgba(0, 0, 0, 0.15)",
+              whiteSpace: "nowrap",
+              maxWidth: "none",
+              width: "max-content",
+              pointerEvents: "none",
+            }}
+          >
+            {content}
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\BlockInput.tsx
+// BlockInput.tsx — Per-block stdin input, shown only while the block is running.
+
+import React, { useState } from "react";
+import { flowService } from "../../services/FlowService";
+
+interface BlockInputProps {
+  blockId: string;
+}
+
+export const BlockInput: React.FC<BlockInputProps> = ({ blockId }) => {
+  const [value, setValue] = useState("");
+
+  const handleSend = () => {
+    const text = value.trim();
+    if (!text) {
+      return;
+    }
+    flowService.sendInput(blockId, text);
+    setValue("");
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "8px",
+        marginTop: "8px",
+        paddingTop: "8px",
+        borderTop: "1px solid var(--vscode-panel-border)",
+      }}
+    >
+      <span
+        style={{ color: "var(--vscode-button-background)", fontWeight: "bold" }}
+      >
+        &gt;
+      </span>
+      <input
+        autoFocus
+        type="text"
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onKeyDown={handleKeyDown}
+        placeholder="Send input to process…"
+        style={{
+          flex: 1,
+          background: "transparent",
+          border: "none",
+          outline: "none",
+          color: "var(--vscode-editor-foreground)",
+          caretColor: "var(--vscode-editorCursor-foreground)",
+          fontFamily: "inherit",
+          fontSize: "12px",
+        }}
+      />
+      <button
+        onClick={handleSend}
+        disabled={!value.trim()}
+        style={{
+          background: "transparent",
+          border: "none",
+          cursor: value.trim() ? "pointer" : "not-allowed",
+          color: value.trim()
+            ? "var(--vscode-button-background)"
+            : "var(--vscode-disabledForeground)",
+          padding: "2px 4px",
+        }}
+      >
+        <span className="codicon codicon-send" style={{ fontSize: "14px" }} />
+      </button>
+    </div>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\ContextMenu.tsx
+// ContextMenu.tsx — Right-click / "more" action menu for a block.
+// Includes MenuItem and MenuDivider as co-located helpers.
+
+import React, { useRef, useEffect } from "react";
+import { FlowBlock } from "../../../types/MessageProtocol";
+
+// ─── MenuItem ─────────────────────────────────────────────────────────────────
+
+interface MenuItemProps {
+  icon: string;
+  label: string;
+  danger?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}
+
+export const MenuItem: React.FC<MenuItemProps> = ({
+  icon,
+  label,
+  danger,
+  disabled,
+  onClick,
+}) => (
+  <button
+    disabled={disabled}
+    onClick={onClick}
+    style={{
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: "8px",
+      padding: "6px 12px",
+      background: "transparent",
+      border: "none",
+      cursor: disabled ? "not-allowed" : "pointer",
+      color: danger
+        ? "var(--vscode-errorForeground)"
+        : "var(--vscode-menu-foreground)",
+      fontSize: "12px",
+      fontFamily: "inherit",
+      opacity: disabled ? 0.4 : 1,
+      textAlign: "left",
+    }}
+    onMouseEnter={(e) => {
+      if (!disabled) {
+        e.currentTarget.style.backgroundColor =
+          "var(--vscode-menu-selectionBackground)";
+        e.currentTarget.style.color = "var(--vscode-menu-selectionForeground)";
+      }
+    }}
+    onMouseLeave={(e) => {
+      e.currentTarget.style.backgroundColor = "transparent";
+      e.currentTarget.style.color = danger
+        ? "var(--vscode-errorForeground)"
+        : "var(--vscode-menu-foreground)";
+    }}
+  >
+    <span className={`codicon ${icon}`} style={{ fontSize: "13px" }} />
+    {label}
+  </button>
+);
+
+// ─── MenuDivider ──────────────────────────────────────────────────────────────
+
+export const MenuDivider: React.FC = () => (
+  <div
+    style={{
+      height: "1px",
+      margin: "2px 8px",
+      backgroundColor:
+        "var(--vscode-menu-separatorBackground, var(--vscode-panel-border))",
+    }}
+  />
+);
+
+// ─── ContextMenu ──────────────────────────────────────────────────────────────
+
+export interface ContextMenuProps {
+  block: FlowBlock;
+  onCopyOutput: () => void;
+  onReRun: () => void;
+  onKill: () => void;
+  onDelete: () => void;
+  onClose: () => void;
+}
+
+export const ContextMenu: React.FC<ContextMenuProps> = ({
+  block,
+  onCopyOutput,
+  onReRun,
+  onKill,
+  onDelete,
+  onClose,
+}) => {
+  const ref = useRef<HTMLDivElement>(null);
+
+  // Close on outside click
+  useEffect(() => {
+    const handleClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [onClose]);
+
+  return (
+    <div
+      ref={ref}
+      style={{
+        position: "absolute",
+        top: "100%",
+        right: 0,
+        marginTop: "4px",
+        backgroundColor: "var(--vscode-menu-background)",
+        border: "1px solid var(--vscode-menu-border)",
+        boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+        zIndex: 100,
+        minWidth: "180px",
+        borderRadius: "4px",
+        overflow: "hidden",
+      }}
+    >
+      <MenuItem
+        icon="codicon-copy"
+        label="Copy Output"
+        onClick={onCopyOutput}
+      />
+      <MenuItem icon="codicon-refresh" label="Re-run" onClick={onReRun} />
+      <MenuDivider />
+      <MenuItem
+        icon="codicon-circle-slash"
+        label="Kill Process"
+        disabled={block.status !== "running"}
+        danger
+        onClick={onKill}
+      />
+      <MenuDivider />
+      <MenuItem
+        icon="codicon-trash"
+        label="Delete Block"
+        danger
+        onClick={onDelete}
+      />
+    </div>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\index.ts
+// barrel index — re-export everything from the block/ directory so
+// consumers can import from "components/block" without knowing internals.
+
+export { OutputBlock } from "./OutputBlock";
+export type { OutputBlockProps } from "./OutputBlock";
+
+export { StatusIcon } from "./StatusIcon";
+export { ToolbarButton } from "./ToolbarButton";
+export type { ToolbarButtonProps } from "./ToolbarButton";
+
+export { ContextMenu, MenuItem, MenuDivider } from "./ContextMenu";
+export type { ContextMenuProps } from "./ContextMenu";
+
+export { BlockInput } from "./BlockInput";
+export { SearchBar } from "./SearchBar";
+export { OutputArea } from "./OutputArea";
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\OutputArea.tsx
+// OutputArea.tsx — Renders a block's streamed output lines with ANSI support
+// and optional search-query highlighting.
+
+import React from "react";
+import Ansi from "ansi-to-react";
+import { FlowBlock, OutputLine } from "../../../types/MessageProtocol";
+
+interface OutputAreaProps {
+  block: FlowBlock;
+  searchQuery: string;
+}
+
+// ─── Line renderer ────────────────────────────────────────────────────────────
+
+interface LineProps {
+  line: OutputLine;
+  highlighted: boolean;
+}
+
+const OutputLine: React.FC<LineProps> = ({ line, highlighted }) => {
+  const color =
+    line.type === "stderr"
+      ? "var(--vscode-testing-message-error-lineBackground, #f44747)"
+      : line.type === "stdin"
+        ? "var(--vscode-button-background)"
+        : "var(--vscode-editor-foreground)";
+
+  return (
+    <div
+      style={{
+        color,
+        backgroundColor: highlighted ? "rgba(255,197,0,0.15)" : "transparent",
+        borderRadius: highlighted ? "2px" : undefined,
+      }}
+    >
+      {line.type === "stdin" ? (
+        <span>
+          <span style={{ opacity: 0.6 }}>&gt; </span>
+          {line.text}
+        </span>
+      ) : (
+        <Ansi>{line.text}</Ansi>
+      )}
+    </div>
+  );
+};
+
+// ─── OutputArea ───────────────────────────────────────────────────────────────
+
+export const OutputArea: React.FC<OutputAreaProps> = ({
+  block,
+  searchQuery,
+}) => {
+  if (block.output.length === 0) {
+    if (block.status === "running") {
+      return (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            opacity: 0.5,
+            paddingLeft: "8px",
+            marginTop: "8px",
+            fontSize: "12px",
+          }}
+        >
+          <span
+            className="codicon codicon-loading"
+            style={{ fontSize: "12px", animation: "spin 1.5s linear infinite" }}
+          />
+          <span>Waiting for output…</span>
+        </div>
+      );
+    }
+    if (block.status === "done") {
+      return (
+        <div
+          style={{
+            opacity: 0.4,
+            paddingLeft: "8px",
+            marginTop: "8px",
+            fontSize: "12px",
+            fontStyle: "italic",
+          }}
+        >
+          (no output)
+        </div>
+      );
+    }
+    return null;
+  }
+
+  const lowerQuery = searchQuery.toLowerCase();
+
+  return (
+    <div
+      style={{
+        marginTop: "8px",
+        paddingLeft: "8px",
+        borderLeft: "2px solid var(--vscode-panel-border)",
+        fontFamily:
+          "var(--vscode-editor-font-family, 'JetBrains Mono', monospace)",
+        fontSize: "12px",
+        lineHeight: "1.5",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-all",
+      }}
+    >
+      {block.output.map((line, i) => (
+        <OutputLine
+          key={i}
+          line={line}
+          highlighted={
+            lowerQuery !== "" && line.text.toLowerCase().includes(lowerQuery)
+          }
+        />
+      ))}
+    </div>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\OutputBlock.tsx
+// OutputBlock.tsx — Container for a single executed notebook block.
+//
+// Composes the focused sub-components from this directory:
+//   StatusIcon, ToolbarButton, ContextMenu, BlockInput, SearchBar, OutputArea
+//
+// Responsibilities of this file:
+//   - Layout and visual state (running accent stripe, hover border)
+//   - Toolbar visibility and state (showSearch, showMenu)
+//   - Action handlers (copy, rerun, kill, delete) delegated upward
+
+import React, { useState, useRef, useCallback } from "react";
+import { FlowBlock } from "../../../types/MessageProtocol";
+import { flowService } from "../../services/FlowService";
+import { StatusIcon } from "./StatusIcon";
+import { ToolbarButton } from "./ToolbarButton";
+import { ContextMenu } from "./ContextMenu";
+import { BlockInput } from "./BlockInput";
+import { SearchBar } from "./SearchBar";
+import { OutputArea } from "./OutputArea";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatDate(ts: number): string {
+  return new Date(ts).toLocaleDateString("en-US", {
+    weekday: "short",
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  });
+}
+
+function shortenPath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+export interface OutputBlockProps {
+  block: FlowBlock;
+  onDelete: (id: string) => void;
+  onReRun: (id: string) => void;
+}
+
+export const OutputBlock: React.FC<OutputBlockProps> = ({
+  block,
+  onDelete,
+  onReRun,
+}) => {
+  const [showMenu, setShowMenu] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  const isRunning = block.status === "running";
+
+  const searchMatchCount = searchQuery
+    ? block.output.filter((l) =>
+        l.text.toLowerCase().includes(searchQuery.toLowerCase()),
+      ).length
+    : 0;
+
+  const handleCopyOutput = useCallback(() => {
+    const text = block.output.map((l) => l.text).join("\n");
+    navigator.clipboard.writeText(text).catch(() => {});
+    setShowMenu(false);
+  }, [block.output]);
+
+  const handleReRun = useCallback(() => {
+    onReRun(block.id);
+    setShowMenu(false);
+  }, [block.id, onReRun]);
+
+  const handleKill = useCallback(() => {
+    flowService.killBlock(block.id);
+    setShowMenu(false);
+  }, [block.id]);
+
+  const handleDelete = useCallback(() => {
+    onDelete(block.id);
+    setShowMenu(false);
+  }, [block.id, onDelete]);
+
+  // ── Visual state based on execution status ────────────────────────────────
+
+  const containerStyle: React.CSSProperties = {
+    position: "relative",
+    borderRadius: "6px",
+    padding: "10px 12px",
+    marginBottom: "2px",
+    border: isRunning
+      ? "1px solid var(--vscode-progressBar-background, #007acc)"
+      : "1px solid transparent",
+    backgroundColor: isRunning ? "rgba(0, 122, 204, 0.04)" : "transparent",
+    transition: "border-color 0.15s, background-color 0.15s",
+  };
+
+  const indent = isRunning ? "10px" : undefined;
+
+  return (
+    <div
+      className="group"
+      style={containerStyle}
+      onMouseEnter={(e) => {
+        if (!isRunning) {
+          e.currentTarget.style.backgroundColor =
+            "var(--vscode-list-hoverBackground)";
+          e.currentTarget.style.borderColor = "var(--vscode-panel-border)";
+        }
+      }}
+      onMouseLeave={(e) => {
+        if (!isRunning) {
+          e.currentTarget.style.backgroundColor = "transparent";
+          e.currentTarget.style.borderColor = "transparent";
+        }
+      }}
+    >
+      {/* Running left accent stripe */}
+      {isRunning && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: "10px",
+            bottom: "10px",
+            width: "2px",
+            borderRadius: "2px",
+            backgroundColor: "var(--vscode-progressBar-background, #007acc)",
+          }}
+        />
+      )}
+
+      {/* ── Toolbar ── */}
+      <div
+        className="block-toolbar"
+        style={{
+          position: "absolute",
+          top: "8px",
+          right: "8px",
+          display: "flex",
+          alignItems: "center",
+          gap: "2px",
+          zIndex: 10,
+          backgroundColor: "var(--vscode-editorWidget-background)",
+          border: "1px solid var(--vscode-panel-border)",
+          borderRadius: "4px",
+          padding: "2px",
+          opacity: isRunning ? 1 : 0,
+        }}
+      >
+        <ToolbarButton
+          icon="codicon-search"
+          title="Search output"
+          active={showSearch}
+          onClick={() => setShowSearch((s) => !s)}
+        />
+        <ToolbarButton
+          icon="codicon-refresh"
+          title="Re-run"
+          onClick={handleReRun}
+        />
+        <ToolbarButton
+          icon="codicon-trash"
+          title="Delete"
+          onClick={handleDelete}
+        />
+        <div
+          style={{
+            width: "1px",
+            height: "16px",
+            backgroundColor: "var(--vscode-panel-border)",
+            margin: "0 2px",
+          }}
+        />
+        <div style={{ position: "relative" }}>
+          <ToolbarButton
+            ref={menuButtonRef}
+            icon="codicon-ellipsis"
+            title="More actions"
+            active={showMenu}
+            onClick={() => setShowMenu((m) => !m)}
+          />
+          {showMenu && (
+            <ContextMenu
+              block={block}
+              onCopyOutput={handleCopyOutput}
+              onReRun={handleReRun}
+              onKill={handleKill}
+              onDelete={handleDelete}
+              onClose={() => setShowMenu(false)}
+            />
+          )}
+        </div>
+      </div>
+
+      {/* ── Header ── */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "6px",
+          fontSize: "11px",
+          color: "var(--vscode-descriptionForeground)",
+          marginBottom: "6px",
+          userSelect: "none",
+          paddingLeft: indent,
+        }}
+      >
+        <span style={{ fontWeight: "bold", opacity: 0.7 }}>#{block.seq}</span>
+        <StatusIcon status={block.status} />
+        {isRunning ? (
+          <span
+            style={{
+              color: "var(--vscode-progressBar-background)",
+              fontWeight: 600,
+            }}
+          >
+            Running
+          </span>
+        ) : (
+          <span>{formatDate(block.createdAt)}</span>
+        )}
+      </div>
+
+      {/* ── Command row ── */}
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "4px 8px",
+          fontWeight: 500,
+          paddingLeft: indent,
+        }}
+      >
+        <span
+          style={{
+            color: "var(--vscode-button-background)",
+            fontWeight: "bold",
+          }}
+        >
+          [local]
+        </span>
+        {block.branch && (
+          <>
+            <span
+              className="codicon codicon-git-branch"
+              style={{ fontSize: "14px", opacity: 0.6 }}
+            />
+            <span style={{ color: "var(--vscode-descriptionForeground)" }}>
+              {block.branch}
+            </span>
+          </>
+        )}
+        <span
+          className="codicon codicon-folder-opened"
+          style={{ fontSize: "14px", opacity: 0.6 }}
+        />
+        <span
+          style={{ color: "var(--vscode-button-background)" }}
+          title={block.cwd}
+        >
+          {shortenPath(block.cwd)}
+        </span>
+        <span
+          style={{
+            color: "var(--vscode-button-background)",
+            fontWeight: "bold",
+          }}
+        >
+          $
+        </span>
+        <span style={{ color: "var(--vscode-editor-foreground)" }}>
+          {block.command}
+        </span>
+        {isRunning && (
+          <span
+            style={{
+              display: "inline-block",
+              width: "8px",
+              height: "14px",
+              backgroundColor: "var(--vscode-editor-foreground)",
+              opacity: 0.5,
+              animation: "blink 1s step-start infinite",
+            }}
+          />
+        )}
+      </div>
+
+      {/* ── Search bar ── */}
+      {showSearch && (
+        <div style={{ marginTop: "8px", paddingLeft: indent }}>
+          <SearchBar
+            query={searchQuery}
+            matchCount={searchMatchCount}
+            onChange={setSearchQuery}
+            onClose={() => {
+              setShowSearch(false);
+              setSearchQuery("");
+            }}
+          />
+        </div>
+      )}
+
+      {/* ── Output ── */}
+      <div style={{ paddingLeft: indent }}>
+        <OutputArea block={block} searchQuery={searchQuery} />
+      </div>
+
+      {/* ── Stdin input (running only) ── */}
+      {isRunning && (
+        <div style={{ paddingLeft: indent }}>
+          <BlockInput blockId={block.id} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default OutputBlock;
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\SearchBar.tsx
+// SearchBar.tsx — Output search input with match count, shown inside a block.
+
+import React from "react";
+
+interface SearchBarProps {
+  query: string;
+  matchCount: number;
+  onChange: (q: string) => void;
+  onClose: () => void;
+}
+
+export const SearchBar: React.FC<SearchBarProps> = ({
+  query,
+  matchCount,
+  onChange,
+  onClose,
+}) => (
+  <div
+    style={{
+      display: "flex",
+      alignItems: "center",
+      gap: "6px",
+      padding: "4px 6px",
+      backgroundColor: "var(--vscode-editorWidget-background)",
+      border: "1px solid var(--vscode-panel-border)",
+      borderRadius: "4px",
+      marginBottom: "8px",
+    }}
+  >
+    <span
+      className="codicon codicon-search"
+      style={{ fontSize: "12px", opacity: 0.6 }}
+    />
+    <input
+      autoFocus
+      type="text"
+      value={query}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder="Search output…"
+      style={{
+        flex: 1,
+        background: "transparent",
+        border: "none",
+        outline: "none",
+        color: "var(--vscode-editor-foreground)",
+        fontFamily: "inherit",
+        fontSize: "12px",
+      }}
+    />
+    {query && (
+      <span
+        style={{
+          fontSize: "10px",
+          color: "var(--vscode-descriptionForeground)",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {matchCount} match{matchCount !== 1 ? "es" : ""}
+      </span>
+    )}
+    <button
+      onClick={onClose}
+      style={{
+        background: "transparent",
+        border: "none",
+        cursor: "pointer",
+        color: "var(--vscode-icon-foreground)",
+        padding: "0 2px",
+      }}
+    >
+      <span className="codicon codicon-close" style={{ fontSize: "12px" }} />
+    </button>
+  </div>
+);
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\StatusIcon.tsx
+// StatusIcon.tsx — Visual status indicator for a block's execution state.
+
+import React from "react";
+import { BlockStatus } from "../../../types/MessageProtocol";
+
+interface StatusIconProps {
+  status: BlockStatus;
+}
+
+const ICONS: Record<BlockStatus, { icon: string; color: string } | null> = {
+  idle: null,
+  running: {
+    icon: "codicon-loading",
+    color: "var(--vscode-progressBar-background)",
+  },
+  done: {
+    icon: "codicon-check",
+    color: "var(--vscode-testing-iconPassed)",
+  },
+  error: {
+    icon: "codicon-error",
+    color: "var(--vscode-testing-iconFailed)",
+  },
+  killed: {
+    icon: "codicon-circle-slash",
+    color: "var(--vscode-disabledForeground)",
+  },
+};
+
+export const StatusIcon: React.FC<StatusIconProps> = ({ status }) => {
+  const cfg = ICONS[status];
+  if (!cfg) {
+    return null;
+  }
+
+  const isSpinning = status === "running";
+
+  return (
+    <span
+      className={`codicon ${cfg.icon}`}
+      style={{
+        fontSize: "14px",
+        color: cfg.color,
+        animation: isSpinning ? "spin 2s linear infinite" : undefined,
+      }}
+    />
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\block\ToolbarButton.tsx
+// ToolbarButton.tsx — Icon button for the block toolbar.
+
+import React, { forwardRef } from "react";
+
+export interface ToolbarButtonProps {
+  icon: string;
+  title: string;
+  active?: boolean;
+  onClick: () => void;
+}
+
+export const ToolbarButton = forwardRef<HTMLButtonElement, ToolbarButtonProps>(
+  ({ icon, title, active, onClick }, ref) => (
+    <button
+      ref={ref}
+      title={title}
+      onClick={onClick}
+      style={{
+        background: active
+          ? "var(--vscode-toolbar-activeBackground)"
+          : "transparent",
+        border: "none",
+        cursor: "pointer",
+        color: "var(--vscode-icon-foreground)",
+        padding: "3px 4px",
+        borderRadius: "3px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.backgroundColor =
+          "var(--vscode-toolbar-hoverBackground)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.backgroundColor = active
+          ? "var(--vscode-toolbar-activeBackground)"
+          : "transparent";
+      }}
+    >
+      <span className={`codicon ${icon}`} style={{ fontSize: "14px" }} />
+    </button>
+  ),
+);
+
+ToolbarButton.displayName = "ToolbarButton";
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\common\index.ts
+// barrel index for components/common/
+export { Tooltip } from "./Tooltip";
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\common\Tooltip.tsx
+// Tooltip.tsx — Reusable tooltip component, renders via a portal.
+// Moved to common/ as it is shared by InputSection and potentially other components.
+
+import React, { useState, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
+
+interface TooltipProps {
+  content: string;
+  children: React.ReactNode;
+  className?: string;
+  delay?: number;
+}
+
+export const Tooltip: React.FC<TooltipProps> = ({
+  content,
+  children,
+  className,
+  delay = 400,
+}) => {
+  const [visible, setVisible] = useState(false);
+  const [position, setPosition] = useState({ top: 0, left: 0 });
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showTooltip = useCallback(() => {
+    timerRef.current = setTimeout(() => {
+      if (triggerRef.current) {
+        const rect = triggerRef.current.getBoundingClientRect();
+        setPosition({
+          top: rect.top - 28,
+          left: rect.left + rect.width / 2,
+        });
+        setVisible(true);
+      }
+    }, delay);
+  }, [delay]);
+
+  const hideTooltip = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+    }
+    setVisible(false);
+  }, []);
+
+  return (
+    <div
+      ref={triggerRef}
+      className={className}
+      onMouseEnter={showTooltip}
+      onMouseLeave={hideTooltip}
+    >
+      {children}
+      {visible &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              top: position.top,
+              left: position.left,
+              transform: "translateX(-50%)",
+              backgroundColor: "var(--vscode-editorHoverWidget-background)",
+              color: "var(--vscode-editorHoverWidget-foreground)",
+              border: "1px solid var(--vscode-editorHoverWidget-border)",
+              borderRadius: "3px",
+              padding: "3px 8px",
+              fontSize: "11px",
+              whiteSpace: "nowrap",
+              zIndex: 9999,
+              pointerEvents: "none",
+              boxShadow: "0 2px 6px rgba(0,0,0,0.4)",
+            }}
+          >
+            {content}
+          </div>,
+          document.body,
+        )}
+    </div>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\input\index.ts
+// barrel index for components/input/
+export { InputSection } from "./InputSection";
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\components\input\InputSection.tsx
+// InputSection.tsx — Command input bar with context display and shell picker.
+// Moved from components/InputBlock.tsx → components/input/InputSection.tsx.
+
+import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
+import { FlowContext, ResolvedShell } from "../../../types/MessageProtocol";
+import { Web } from "../../../utils/logger";
+import { Tooltip } from "../common/Tooltip";
+
+interface InputSectionProps {
+  context: FlowContext;
+  onRun: (cmd: string) => void;
+  onShellChange: (shell: string) => void;
+  onCwdChange?: (cwd: string) => void;
+  availableShells: ResolvedShell[];
+  isRunning?: boolean;
+}
+
+export const InputSection: React.FC<InputSectionProps> = ({
+  context,
+  onRun,
+  onShellChange,
+  onCwdChange,
+  availableShells,
+  isRunning = false,
+}) => {
+  const [input, setInput] = useState("");
+  const [showShellMenu, setShowShellMenu] = useState(false);
+  const [menuPosition, setMenuPosition] = useState({
+    top: 0,
+    left: 0,
+    bottom: 0,
+  });
+
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        showShellMenu &&
+        menuRef.current &&
+        !menuRef.current.contains(event.target as Node) &&
+        buttonRef.current &&
+        !buttonRef.current.contains(event.target as Node)
+      ) {
+        setShowShellMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showShellMenu]);
+
+  const hasShell = Boolean(context.shell);
+
+  const handleRun = () => {
+    if (!hasShell) return;
+    if (input.trim() && !isRunning) {
+      onRun(input);
+      setInput("");
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleRun();
+    }
+  };
+
+  const getShellName = (path: string) => {
+    if (!path) return "";
+    const lowerPath = path.toLowerCase().replace(/\\/g, "/");
+    const fileName = lowerPath.split("/").pop() || "";
+    return fileName.replace(/.*-/, "").replace(/\.exe$/, "");
+  };
+
+  const getShellDisplay = () => {
+    if (!context.shell) return "No Shell";
+    const shellObj = availableShells.find((s) => s.path === context.shell);
+    return shellObj ? shellObj.label : getShellName(context.shell);
+  };
+
+  const toggleMenu = () => {
+    if (!showShellMenu && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setMenuPosition({
+        top: rect.top,
+        left: rect.left,
+        bottom: window.innerHeight - rect.top,
+      });
+    }
+    setShowShellMenu(!showShellMenu);
+  };
+
+  return (
+    <div
+      style={{
+        backgroundColor: "var(--vscode-editor-background)",
+        borderTop: "1px solid var(--vscode-panel-border)",
+      }}
+      className="p-4 shrink-0 relative"
+    >
+      <div
+        style={{
+          backgroundColor: "var(--vscode-input-background)",
+          border: "1px solid var(--vscode-panel-border)",
+        }}
+        className="flex flex-col rounded-sm transition-all duration-100 overflow-hidden"
+        onFocus={(e) => {
+          e.currentTarget.style.borderColor = "var(--vscode-focusBorder)";
+        }}
+        onBlur={(e) => {
+          e.currentTarget.style.borderColor = "var(--vscode-panel-border)";
+        }}
+      >
+        {/* Context Bar */}
+        <div
+          style={{
+            backgroundColor: "var(--vscode-editorWidget-background)",
+            borderBottom: "1px solid var(--vscode-panel-border)",
+            color: "var(--vscode-descriptionForeground)",
+          }}
+          className="flex items-center rounded-t-sm gap-2 text-xs px-3 py-1.5 select-none font-mono"
+        >
+          <span
+            style={{ color: "var(--vscode-button-background)" }}
+            className="font-bold"
+          >
+            [{context.connection}]
+          </span>
+          <div className="flex items-center gap-1">
+            <span
+              className="codicon codicon-git-branch"
+              style={{ fontSize: "14px" }}
+            />
+            <span>{context.branch || "no branch"}</span>
+          </div>
+          <Tooltip content="Copy path (Ctrl + Click)">
+            <div
+              className="flex items-center gap-1 group/cwd cursor-pointer"
+              onClick={(e) => {
+                if (e.ctrlKey) {
+                  navigator.clipboard.writeText(context.cwd);
+                } else {
+                  onCwdChange && onCwdChange(context.cwd);
+                }
+              }}
+            >
+              <span
+                className="codicon codicon-folder-opened group-hover/cwd:text-(--vscode-button-background) transition-colors"
+                style={{ fontSize: "14px" }}
+              />
+              <span
+                style={{ color: "var(--vscode-button-background)" }}
+                className="truncate max-w-[300px] group-hover/cwd:underline"
+              >
+                {context.cwd}
+              </span>
+            </div>
+          </Tooltip>
+        </div>
+
+        {/* Input Area */}
+        <div
+          style={{ backgroundColor: "var(--vscode-input-background)" }}
+          className="flex items-center rounded-b-sm"
+        >
+          <div className="relative">
+            <div
+              style={{ borderRight: "1px solid var(--vscode-panel-border)" }}
+              className="flex items-center shrink-0"
+            >
+              <button
+                ref={buttonRef}
+                onClick={toggleMenu}
+                disabled={isRunning}
+                style={{ color: "var(--vscode-input-foreground)" }}
+                className="flex items-center gap-1.5 px-3 py-2 transition-colors group disabled:opacity-50 disabled:cursor-not-allowed"
+                onMouseEnter={(e) => {
+                  if (!isRunning) {
+                    e.currentTarget.style.backgroundColor =
+                      "var(--vscode-list-hoverBackground)";
+                    e.currentTarget.style.color =
+                      "var(--vscode-editor-foreground)";
+                  }
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = "transparent";
+                  e.currentTarget.style.color =
+                    "var(--vscode-input-foreground)";
+                }}
+              >
+                <div className="flex items-center gap-2">
+                  {availableShells.length === 0 ? (
+                    <>
+                      <div
+                        style={{
+                          backgroundColor: "var(--vscode-icon-foreground)",
+                        }}
+                        className="w-3 h-3 rounded-full opacity-20 animate-pulse"
+                      />
+                      <div
+                        style={{
+                          backgroundColor: "var(--vscode-icon-foreground)",
+                        }}
+                        className="w-12 h-3 rounded opacity-20 animate-pulse"
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <span
+                        className={`codicon ${
+                          availableShells.find((s) => s.path === context.shell)
+                            ?.icon || "codicon-terminal"
+                        }`}
+                        style={{ fontSize: "16px" }}
+                      />
+                      <span className="text-[11px] font-bold tracking-tight lowercase max-w-[100px] truncate font-mono">
+                        {getShellDisplay()}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <span
+                  className="codicon codicon-chevron-down transition-colors group-hover:text-(--vscode-editor-foreground)"
+                  style={{
+                    fontSize: "14px",
+                    color: "var(--vscode-descriptionForeground)",
+                  }}
+                />
+              </button>
+            </div>
+
+            {/* Shell Dropdown — rendered via portal to escape overflow:hidden */}
+            {showShellMenu &&
+              createPortal(
+                <div
+                  ref={menuRef}
+                  style={{
+                    position: "fixed",
+                    bottom: menuPosition.bottom + 4,
+                    left: menuPosition.left,
+                    backgroundColor: "var(--vscode-menu-background)",
+                    border: "1px solid var(--vscode-menu-border)",
+                    boxShadow: "0 2px 8px var(--vscode-widget-shadow)",
+                    zIndex: 9999,
+                    maxHeight: "320px",
+                    overflowY: "auto",
+                    minWidth: "280px",
+                  }}
+                  className="rounded-sm py-1"
+                >
+                  {availableShells.map((option) => {
+                    const isSelected = context.shell === option.path;
+                    return (
+                      <Tooltip
+                        key={option.path}
+                        content={option.path}
+                        className="block w-full"
+                      >
+                        <button
+                          onClick={() => {
+                            Web.info(
+                              `[InputSection] Selected shell: ${option.label} -> ${option.path}`,
+                            );
+                            onShellChange(option.path);
+                            setShowShellMenu(false);
+                          }}
+                          style={{
+                            color: "var(--vscode-menu-foreground)",
+                            height: "25px",
+                          }}
+                          className="vscode-menu-item flex items-center w-full px-2 text-[13px] text-left border-none outline-none cursor-pointer transition-colors"
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "var(--vscode-menu-selectionBackground)";
+                            e.currentTarget.style.color =
+                              "var(--vscode-menu-selectionForeground)";
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor =
+                              "transparent";
+                            e.currentTarget.style.color =
+                              "var(--vscode-menu-foreground)";
+                          }}
+                        >
+                          {/* Checkmark */}
+                          <div
+                            className="flex items-center justify-center shrink-0"
+                            style={{
+                              width: "16px",
+                              height: "16px",
+                              marginRight: "4px",
+                              opacity: isSelected ? 1 : 0,
+                            }}
+                          >
+                            <span className="codicon codicon-check" />
+                          </div>
+                          {/* Shell icon */}
+                          <div
+                            className="flex items-center justify-center shrink-0"
+                            style={{
+                              width: "16px",
+                              height: "16px",
+                              marginRight: "8px",
+                            }}
+                          >
+                            <span
+                              className={`codicon ${
+                                option.icon || "codicon-terminal"
+                              }`}
+                            />
+                          </div>
+                          {/* Label */}
+                          <span className="flex-1 truncate font-mono">
+                            {option.label}
+                          </span>
+                        </button>
+                      </Tooltip>
+                    );
+                  })}
+                </div>,
+                document.body,
+              )}
+          </div>
+
+          <div className="flex-1 flex items-center gap-2 px-3 py-2">
+            <span
+              style={{ color: "var(--vscode-button-background)" }}
+              className="font-bold"
+            >
+              $
+            </span>
+            <input
+              ref={inputRef}
+              autoFocus
+              disabled={isRunning || !hasShell}
+              style={{
+                backgroundColor: "transparent",
+                color: "var(--vscode-editor-foreground)",
+                caretColor: "var(--vscode-editorCursor-foreground)",
+              }}
+              className="flex-1 border-none p-0 focus:ring-0 placeholder-(--vscode-input-placeholderForeground) selection:bg-(--vscode-editor-selectionBackground) font-mono text-sm leading-6 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+              placeholder={
+                !hasShell
+                  ? "Select a shell to enter commands..."
+                  : isRunning
+                    ? "Running..."
+                    : "Type a command..."
+              }
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+            <button
+              onClick={handleRun}
+              disabled={!input.trim() || isRunning || !hasShell}
+              style={{ color: "var(--vscode-button-background)" }}
+              className="rounded p-1 flex items-center justify-center transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              onMouseEnter={(e) => {
+                if (input.trim() && !isRunning && hasShell) {
+                  e.currentTarget.style.color =
+                    "var(--vscode-button-foreground)";
+                  e.currentTarget.style.backgroundColor =
+                    "rgba(255,255,255,0.05)";
+                }
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.color = "var(--vscode-button-background)";
+                e.currentTarget.style.backgroundColor = "transparent";
+              }}
+            >
+              <span
+                className="codicon codicon-arrow-right"
+                style={{ fontSize: "18px" }}
+              />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\hooks\useBlockExecution.ts
+// =============================================================================
+// useBlockExecution.ts
+//
+// Subscribes to execution-related messages from the extension and routes
+// them to the appropriate notebookStore mutations.
+//
+// This hook is the single place that translates raw extension messages into
+// typed state transitions. It has no local state of its own.
+// =============================================================================
+
+import { useEffect } from "react";
+import { flowService } from "../services/FlowService";
+import { OutputLine, BlockStatus } from "../../types/MessageProtocol";
+
+interface UseBlockExecutionProps {
+  appendOutput: (blockId: string, lines: OutputLine[]) => void;
+  completeBlock: (
+    blockId: string,
+    exitCode: number | null,
+    finalCwd: string | null,
+    finalBranch: string | null,
+    status: "done" | "error" | "killed",
+  ) => void;
+  setBlockStatus: (blockId: string, status: BlockStatus) => void;
+}
+
+/**
+ * Routes streaming execution events from the extension to notebookStore.
+ *
+ * Handled message types:
+ *   - "stream"        → appendOutput
+ *   - "blockComplete" → completeBlock
+ *   - "blockError"    → appendOutput (error line) + setBlockStatus("error")
+ */
+export function useBlockExecution({
+  appendOutput,
+  completeBlock,
+  setBlockStatus,
+}: UseBlockExecutionProps): void {
+  useEffect(() => {
+    const unsubscribe = flowService.subscribe((message: any) => {
+      switch (message.type) {
+        case "stream": {
+          appendOutput(message.blockId, message.lines);
+          break;
+        }
+
+        case "blockComplete": {
+          completeBlock(
+            message.blockId,
+            message.exitCode,
+            message.finalCwd,
+            message.finalBranch,
+            message.status,
+          );
+          break;
+        }
+
+        case "blockError": {
+          // Surface the error as a visible stderr line, then mark the block.
+          appendOutput(message.blockId, [
+            { type: "stderr", text: `[Flow Error] ${message.message}` },
+          ]);
+          setBlockStatus(message.blockId, "error");
+          break;
+        }
+
+        default:
+          break;
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [appendOutput, completeBlock, setBlockStatus]);
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\hooks\useDocument.ts
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\hooks\useExtension.ts
+import { useEffect } from "react";
+import { Web } from "../../utils/logger";
+
+/**
+ * Hook to handle messages from the extension
+ * Routes messages to appropriate handlers
+ */
+export function useExtension() {
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      const message = event.data;
+      switch (message.type) {
+        case "init":
+          Web.info("Extension initialized", message);
+          break;
+        default:
+          Web.info("Unknown message type:", message.type, message);
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => {
+      window.removeEventListener("message", handleMessage);
+    };
+  }, []);
+}
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\hooks\useFlowDocument.ts
+// =============================================================================
+// useFlowDocument.ts
+//
+// Manages document-level state: the saved FlowDocument and the live FlowContext
+// received from the extension on init.
+//
+// Responsibilities:
+//   - Request initial state from the extension on mount.
+//   - Store the document preferences (shell, cwd, branch) and saved blocks.
+//   - Store the live context (working directory and git branch detected by the
+//     extension at open time).
+//   - Provide updateDocument() for immediate preference changes that should
+//     auto-persist (e.g. shell selection).
+//   - Provide saveDocument() for the explicit notebook save action.
+// =============================================================================
+
+import { useEffect, useState, useCallback } from "react";
+import { produce } from "immer";
+import { flowService } from "../services/FlowService";
+import {
+  FlowDocument,
+  FlowContext,
+  FlowBlock,
+} from "../../types/MessageProtocol";
+
+const DEFAULT_CONTEXT: FlowContext = {
+  cwd: "",
+  branch: null,
+  shell: null,
+  connection: "local",
+};
+
+export interface UseFlowDocumentReturn {
+  /** The persisted document preferences (shell, cwd, branch) and optional saved blocks. */
+  document: FlowDocument;
+  /** The live runtime context detected by the extension (real cwd, git branch). */
+  context: FlowContext;
+  /**
+   * Update document preferences using an Immer producer.
+   * Changes are immediately persisted to disk (suitable for preference fields
+   * like shell selection — not for block output streaming).
+   */
+  updateDocument: (producer: (draft: FlowDocument) => void) => void;
+  /**
+   * Explicitly save the full notebook state to disk.
+   * Call this only on deliberate user save actions, not on execution events.
+   */
+  saveDocument: (blocks: FlowBlock[], runtimeContext: FlowContext) => void;
+}
+
+export const useFlowDocument = (): UseFlowDocumentReturn => {
+  const [document, setDocument] = useState<FlowDocument>({});
+  const [context, setContext] = useState<FlowContext>(DEFAULT_CONTEXT);
+
+  useEffect(() => {
+    const unsubscribe = flowService.subscribe((message: any) => {
+      if (message.type === "init") {
+        // doc may include saved blocks/runtimeContext from a previous explicit save
+        setDocument(message.document ?? {});
+        setContext(message.context ?? DEFAULT_CONTEXT);
+      } else if (message.type === "update") {
+        // Extension echoes back after writing — keep local state in sync
+        if (message.document) {
+          setDocument(message.document);
+        }
+        if (message.context) {
+          setContext(message.context);
+        }
+      }
+    });
+
+    // Kick-start: ask the extension for the initial state and live context.
+    flowService.init();
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  /**
+   * Update a preference field (e.g. shell selection) and auto-persist.
+   * Uses an Immer producer for safe immutable updates.
+   */
+  const updateDocument = useCallback(
+    (producer: (draft: FlowDocument) => void) => {
+      setDocument((prev) => {
+        const next = produce(prev, producer);
+        // Auto-persist preference changes immediately
+        flowService.saveDocument(next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  /**
+   * Persist the full notebook state to disk.
+   * This is an intentional user action — not triggered by streaming events.
+   */
+  const saveDocument = useCallback(
+    (blocks: FlowBlock[], runtimeContext: FlowContext) => {
+      setDocument((prev) => {
+        const next: FlowDocument = {
+          ...prev,
+          blocks,
+          runtimeContext,
+        };
+        flowService.saveDocument(next);
+        return next;
+      });
+    },
+    [],
+  );
+
+  return { document, context, updateDocument, saveDocument };
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\hooks\useShellConfig.ts
+import { useEffect, useState } from "react";
+import { flowService } from "../services/FlowService";
+import { ResolvedShell } from "../../types/MessageProtocol";
+
+export const useShellConfig = () => {
+  const [shells, setShells] = useState<ResolvedShell[]>([]);
+  const [selectedShell, setSelectedShell] = useState<ResolvedShell | null>(
+    null,
+  );
+
+  useEffect(() => {
+    const unsubscribe = flowService.subscribe((message: any) => {
+      if (message.type === "shellList") {
+        setShells(message.shells);
+        if (message.shells.length > 0 && !selectedShell) {
+          setSelectedShell(message.shells[0]);
+        }
+      }
+    });
+
+    flowService.getShellConfig();
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  return { shells, selectedShell, setSelectedShell };
+};
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\services\FlowService.ts
+// =============================================================================
+// FlowService.ts
+//
+// Singleton bridge between the React webview and the VS Code extension host.
+// All messages crossing the boundary must be typed against MessageProtocol.ts.
+// =============================================================================
+
+import { FlowDocument, WebviewMessage } from "../../types/MessageProtocol";
+import { Web } from "../../utils/logger";
+
+interface VsCodeApi {
+  postMessage: (message: WebviewMessage) => void;
+  getState: () => any;
+  setState: (state: any) => void;
+}
+
+declare const acquireVsCodeApi: () => VsCodeApi;
+
+class FlowService {
+  private static instance: FlowService;
+  private vscode: VsCodeApi;
+  private listeners: Set<(message: any) => void> = new Set();
+
+  private constructor() {
+    this.vscode = acquireVsCodeApi();
+    Web.setVSCode(this.vscode);
+
+    // Route all extension messages to registered listeners.
+    window.addEventListener("message", (event) => {
+      this.notifyListeners(event.data);
+    });
+  }
+
+  public static getInstance(): FlowService {
+    if (!FlowService.instance) {
+      FlowService.instance = new FlowService();
+    }
+    return FlowService.instance;
+  }
+
+  // ─── Pub/Sub ────────────────────────────────────────────────────────────────
+
+  /** Register a listener for extension messages. Returns an unsubscribe fn. */
+  public subscribe(listener: (message: any) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notifyListeners(message: any) {
+    this.listeners.forEach((l) => l(message));
+  }
+
+  // ─── Outbound Messages ──────────────────────────────────────────────────────
+
+  /** Request the initial document state and live context from the extension. */
+  public init(): void {
+    this.vscode.postMessage({ type: "init" });
+  }
+
+  /**
+   * Explicitly save the full notebook state to disk.
+   * This is the ONLY way notebook state is persisted — do not call on every
+   * execution event.
+   */
+  public saveDocument(document: FlowDocument): void {
+    this.vscode.postMessage({ type: "update", document });
+  }
+
+  /** Request the list of shells available on the host machine. */
+  public getShellConfig(): void {
+    this.vscode.postMessage({ type: "shellConfig" });
+  }
+
+  /**
+   * Start executing a command in a new isolated shell process.
+   * @param args - Shell launch args from ResolvedShell.args (sourced from constant.ts).
+   *               The engine appends the wrapped command after these.
+   */
+  public execute(
+    blockId: string,
+    command: string,
+    shell: string,
+    args: string[],
+    cwd: string,
+  ): void {
+    this.vscode.postMessage({
+      type: "execute",
+      blockId,
+      command,
+      shell,
+      args,
+      cwd,
+    });
+  }
+
+  /** Send user input to a running block's process stdin. */
+  public sendInput(blockId: string, text: string): void {
+    this.vscode.postMessage({ type: "input", blockId, text });
+  }
+
+  /** Terminate the process associated with a running block. */
+  public killBlock(blockId: string): void {
+    this.vscode.postMessage({ type: "killBlock", blockId });
+  }
+}
+
+export const flowService = FlowService.getInstance();
+
+
+C:\Users\Daksh\Desktop\projects\Flow\src\webview\store\notebookStore.ts
+// =============================================================================
+// notebookStore.ts
+//
+// React hook that owns the full in-memory notebook state for the webview.
+//
+// Design:
+//   - All block state is local to this hook; the extension never sees it
+//     unless the user explicitly saves.
+//   - State mutations use Immer so all updates are immutable and predictable.
+//   - Block creation freezes the current runtimeContext into the new block.
+//   - Block completion updates runtimeContext using a sequence guard to prevent
+//     an earlier block that finishes late from overwriting newer context data.
+// =============================================================================
+
+import { useState, useCallback } from "react";
+import { produce } from "immer";
+import {
+  FlowBlock,
+  BlockStatus,
+  FlowContext,
+  OutputLine,
+} from "../../types/MessageProtocol";
+import { generateId } from "../../utils/helper";
+
+// ─── Internal State Shape ─────────────────────────────────────────────────────
+
+interface NotebookState {
+  blocks: FlowBlock[];
+  runtimeContext: FlowContext;
+  /** Monotonically increasing counter; next block gets `blockSeq + 1`. */
+  blockSeq: number;
+}
+
+// ─── useNotebook Hook ─────────────────────────────────────────────────────────
+
+export interface UseNotebookReturn {
+  blocks: FlowBlock[];
+  runtimeContext: FlowContext;
+  createBlock: (
+    command: string,
+    shell: string,
+    cwd: string,
+    branch: string | null,
+  ) => string;
+  appendOutput: (blockId: string, lines: OutputLine[]) => void;
+  setBlockStatus: (blockId: string, status: BlockStatus) => void;
+  completeBlock: (
+    blockId: string,
+    exitCode: number | null,
+    finalCwd: string | null,
+    finalBranch: string | null,
+    status: "done" | "error" | "killed",
+  ) => void;
+  deleteBlock: (blockId: string) => void;
+  reRunBlock: (blockId: string) => string | null;
+  setRuntimeContext: (ctx: FlowContext) => void;
+  resetNotebook: (blocks: FlowBlock[], runtimeContext: FlowContext) => void;
+}
+
+/**
+ * Manages the full in-memory notebook state.
+ *
+ * @param initialContext - Runtime context to use when the hook first mounts.
+ * @param initialBlocks  - Pre-existing blocks to restore (e.g. from saved file).
+ */
+export function useNotebook(
+  initialContext: FlowContext,
+  initialBlocks: FlowBlock[] = [],
+): UseNotebookReturn {
+  const [state, setState] = useState<NotebookState>(() => ({
+    blocks: initialBlocks,
+    runtimeContext: initialContext,
+    blockSeq: initialBlocks.reduce((max, b) => Math.max(max, b.seq), 0),
+  }));
+
+  // ─── Context management ─────────────────────────────────────────────────────
+
+  /**
+   * Overwrite the runtimeContext completely.
+   * Called when the extension sends the live context on init.
+   * Does NOT affect any existing block's frozen properties.
+   */
+  const setRuntimeContext = useCallback((ctx: FlowContext) => {
+    setState((prev) =>
+      produce(prev, (draft) => {
+        draft.runtimeContext = ctx;
+      }),
+    );
+  }, []);
+
+  /**
+   * Reset the entire notebook (blocks + context).
+   * Used when loading a previously saved document.
+   */
+  const resetNotebook = useCallback(
+    (blocks: FlowBlock[], runtimeContext: FlowContext) => {
+      setState({
+        blocks,
+        runtimeContext,
+        blockSeq: blocks.reduce((max, b) => Math.max(max, b.seq), 0),
+      });
+    },
+    [],
+  );
+
+  // ─── Block lifecycle ────────────────────────────────────────────────────────
+
+  /**
+   * Create a new block and freeze the current runtime context into it.
+   * Returns the new block's ID so the caller can dispatch an `execute` message.
+   */
+  const createBlock = useCallback(
+    (
+      command: string,
+      shell: string,
+      cwd: string,
+      branch: string | null,
+    ): string => {
+      const id = generateId();
+      setState((prev) =>
+        produce(prev, (draft) => {
+          const seq = draft.blockSeq + 1;
+          draft.blockSeq = seq;
+          draft.blocks.push({
+            id,
+            seq,
+            command,
+            shell, // frozen at creation
+            cwd, // frozen at creation
+            branch, // frozen at creation
+            status: "running",
+            output: [],
+            exitCode: null,
+            finalCwd: null,
+            finalBranch: null,
+            createdAt: Date.now(),
+          });
+        }),
+      );
+      return id;
+    },
+    [],
+  );
+
+  /**
+   * Append streamed output lines to a block's output array.
+   * Called for every `stream` message received from the extension.
+   */
+  const appendOutput = useCallback((blockId: string, lines: OutputLine[]) => {
+    setState((prev) =>
+      produce(prev, (draft) => {
+        const block = draft.blocks.find((b) => b.id === blockId);
+        if (block) {
+          block.output.push(...lines);
+        }
+      }),
+    );
+  }, []);
+
+  /**
+   * Set a block's status without updating completion metadata.
+   * Useful for immediate "killed" status before the process exits.
+   */
+  const setBlockStatus = useCallback((blockId: string, status: BlockStatus) => {
+    setState((prev) =>
+      produce(prev, (draft) => {
+        const block = draft.blocks.find((b) => b.id === blockId);
+        if (block) {
+          block.status = status;
+        }
+      }),
+    );
+  }, []);
+
+  /**
+   * Mark a block as complete and update the global runtimeContext.
+   *
+   * **Sequence guard**: runtimeContext is updated only if this block's `seq`
+   * is >= the seq of whichever block last wrote to the context. This prevents
+   * a slow earlier block (lower seq) from overwriting the context after a
+   * faster later block (higher seq) has already set a newer path.
+   */
+  const completeBlock = useCallback(
+    (
+      blockId: string,
+      exitCode: number | null,
+      finalCwd: string | null,
+      finalBranch: string | null,
+      status: "done" | "error" | "killed",
+    ) => {
+      setState((prev) => {
+        const block = prev.blocks.find((b) => b.id === blockId);
+        if (!block) {
+          return prev;
+        }
+
+        return produce(prev, (draft) => {
+          const b = draft.blocks.find((bl) => bl.id === blockId)!;
+          b.status = status;
+          b.exitCode = exitCode;
+          b.finalCwd = finalCwd;
+          b.finalBranch = finalBranch;
+
+          // Only advance the runtime context for non-killed completions
+          // that provide a new cwd, and whose seq is not stale.
+          if (status !== "killed" && finalCwd) {
+            const contextSourceSeq =
+              (draft.runtimeContext as any).__sourceSeq ?? 0;
+            if (b.seq >= contextSourceSeq) {
+              draft.runtimeContext = {
+                ...draft.runtimeContext,
+                cwd: finalCwd,
+                branch: finalBranch ?? draft.runtimeContext.branch,
+              };
+              // Store the source seq on the context object for future guards.
+              (draft.runtimeContext as any).__sourceSeq = b.seq;
+            }
+          }
+        });
+      });
+    },
+    [],
+  );
+
+  /**
+   * Remove a block from the list.
+   * Running blocks should be killed first via flowService.killBlock().
+   */
+  const deleteBlock = useCallback((blockId: string) => {
+    setState((prev) =>
+      produce(prev, (draft) => {
+        const idx = draft.blocks.findIndex((b) => b.id === blockId);
+        if (idx !== -1) {
+          draft.blocks.splice(idx, 1);
+        }
+      }),
+    );
+  }, []);
+
+  /**
+   * Clone a completed block into a new "running" block using the original
+   * block's frozen shell, cwd, and branch.
+   * Returns the new block ID or null if the source block is not found.
+   */
+  const reRunBlock = useCallback(
+    (blockId: string): string | null => {
+      // Capture the source block properties synchronously before setState
+      const block = state.blocks.find((b) => b.id === blockId);
+      if (!block) {
+        return null;
+      }
+      return createBlock(block.command, block.shell, block.cwd, block.branch);
+    },
+    [state.blocks, createBlock],
+  );
+
+  return {
+    blocks: state.blocks,
+    runtimeContext: state.runtimeContext,
+    createBlock,
+    appendOutput,
+    setBlockStatus,
+    completeBlock,
+    deleteBlock,
+    reRunBlock,
+    setRuntimeContext,
+    resetNotebook,
+  };
+}

@@ -1,6 +1,3 @@
-// =============================================================================
-// App.tsx
-//
 // Root notebook application component.
 //
 // Wires all hooks together and passes props down to the InputSection and
@@ -8,7 +5,6 @@
 //   - Document preferences (shell, cwd) are derived for the InputSection.
 //   - Block execution is initiated (createBlock → flowService.execute).
 //   - Explicit notebook saves are triggered (saveDocument).
-// =============================================================================
 
 import { useEffect, useRef, useCallback } from "react";
 import { useFlowDocument } from "./hooks/useFlowDocument";
@@ -20,7 +16,6 @@ import { OutputBlock } from "./components/block";
 import { flowService } from "./services/FlowService";
 import { FlowContext } from "../types/MessageProtocol";
 
-// ── CSS animations injected once into <head> ──────────────────────────────────
 const ANIM_CSS = `
 @keyframes spin {
   from { transform: rotate(0deg); }
@@ -46,7 +41,6 @@ export default function App() {
   } = useFlowDocument();
   const { shells } = useShellConfig();
 
-  // ── Notebook store (source of truth for all block state) ──────────────────
   const {
     blocks,
     runtimeContext,
@@ -82,10 +76,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [docContext.cwd]);
 
-  // ── Wire execution events from extension to notebookStore ─────────────────
+  //  Wire execution events from extension to notebookStore
   useBlockExecution({ appendOutput, completeBlock, setBlockStatus });
 
-  // ── Inject CSS animations once ────────────────────────────────────────────
+  // Inject CSS animations once
   const styleInjected = useRef(false);
   if (!styleInjected.current) {
     styleInjected.current = true;
@@ -94,7 +88,7 @@ export default function App() {
     window.document.head.appendChild(style);
   }
 
-  // ── Merged context for the InputSection ───────────────────────────────────
+  //  Merged context for the InputSection
   // Prefer runtime-detected values; fall back to document preferences.
   const displayContext: FlowContext = {
     cwd: runtimeContext.cwd || document.cwd || "",
@@ -102,8 +96,6 @@ export default function App() {
     shell: document.shell ?? runtimeContext.shell ?? null,
     connection: runtimeContext.connection ?? "local",
   };
-
-  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleRun = (cmd: string) => {
     const shell = displayContext.shell;
@@ -170,7 +162,8 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleSave]);
 
-  const isAnyRunning = blocks.some((b) => b.status === "running");
+  const safeBlocks = Array.isArray(blocks) ? blocks : [];
+  const isAnyRunning = safeBlocks.some((b) => b.status === "running");
 
   return (
     <div
@@ -182,7 +175,7 @@ export default function App() {
       }}
     >
       <main className="flex-1 overflow-y-auto" style={{ padding: "12px 16px" }}>
-        {blocks.length === 0 && (
+        {safeBlocks.length === 0 && (
           <div
             className="flex flex-col items-center justify-center h-full opacity-40"
             style={{ color: "var(--vscode-descriptionForeground)" }}
@@ -198,7 +191,7 @@ export default function App() {
           </div>
         )}
 
-        {[...blocks]
+        {[...safeBlocks]
           .sort((a, b) => a.seq - b.seq)
           .map((block, idx) => (
             <div key={block.id}>
@@ -207,7 +200,7 @@ export default function App() {
                 onDelete={deleteBlock}
                 onReRun={handleReRun}
               />
-              {idx < blocks.length - 1 && (
+              {idx < safeBlocks.length - 1 && (
                 <div
                   style={{
                     height: "1px",
@@ -224,7 +217,7 @@ export default function App() {
         <div style={{ height: "24px" }} />
       </main>
 
-      {/* ── Input bar ── */}
+      {/* Input bar */}
       <InputSection
         context={displayContext}
         availableShells={shells}

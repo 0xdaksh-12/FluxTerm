@@ -135,7 +135,11 @@ export const InputSection: React.FC<InputSectionProps> = ({
               className="codicon codicon-git-branch"
               style={{ fontSize: "14px" }}
             />
-            <span>{context.branch || "no branch"}</span>
+            <span>
+              {typeof context.branch === "string"
+                ? context.branch
+                : "no branch"}
+            </span>
           </div>
           <Tooltip content="Copy path (Ctrl + Click)">
             <div

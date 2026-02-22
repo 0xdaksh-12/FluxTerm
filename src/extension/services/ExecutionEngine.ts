@@ -346,11 +346,15 @@ export class ExecutionEngine {
     const meta = rec.meta;
     const exitCode = meta?.exit ?? code ?? null;
 
+    const safeBranch = typeof meta?.branch === "string" ? meta?.branch : null;
+
+    const safeCwd = typeof meta?.cwd === "string" ? meta?.cwd : null;
+
     const payload: BlockCompletePayload = {
       blockId,
       exitCode,
-      finalCwd: meta?.cwd ?? null,
-      finalBranch: meta?.branch ?? null,
+      finalCwd: safeCwd,
+      finalBranch: safeBranch,
       status: rec.isKilled ? "killed" : exitCode === 0 ? "done" : "error",
     };
 

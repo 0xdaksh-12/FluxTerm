@@ -73,8 +73,7 @@ export function useNotebook(
     blockSeq: initialBlocks.reduce((max, b) => Math.max(max, b.seq), 0),
   }));
 
-  // ─── Context management ─────────────────────────────────────────────────────
-
+  // Context management
   /**
    * Overwrite the runtimeContext completely.
    * Called when the extension sends the live context on init.
@@ -202,15 +201,18 @@ export function useNotebook(
           b.finalBranch = finalBranch;
 
           // Only advance the runtime context for non-killed completions
-          // that provide a new cwd, and whose seq is not stale.
-          if (status !== "killed" && finalCwd) {
+          // that provide a valid string cwd, and whose seq is not stale.
+          if (status !== "killed" && typeof finalCwd === "string") {
             const contextSourceSeq =
               (draft.runtimeContext as any).__sourceSeq ?? 0;
             if (b.seq >= contextSourceSeq) {
               draft.runtimeContext = {
                 ...draft.runtimeContext,
                 cwd: finalCwd,
-                branch: finalBranch ?? draft.runtimeContext.branch,
+                branch:
+                  typeof finalBranch === "string"
+                    ? finalBranch
+                    : draft.runtimeContext.branch,
               };
               // Store the source seq on the context object for future guards.
               (draft.runtimeContext as any).__sourceSeq = b.seq;
