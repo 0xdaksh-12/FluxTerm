@@ -24,6 +24,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
   - `FlowDocument.shell` remains `string` (shell `id`) for JSON serialization; webview matches it to the live shell list on load
   - `FlowDocumentSession`: extension send `shell: null` in init context; webview restores selection from saved `id` + shell list
 - Renamed `src/utils/constant.ts` -> `src/utils/constants.ts` adhering to the rule that any source of truth must be in `constants.ts`
+- Excluded vitest configs from `tsconfig.json` to fix `rootDir` errors
 
 ## [0.0.1] - 2026-02-22
 
