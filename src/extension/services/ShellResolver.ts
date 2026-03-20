@@ -7,14 +7,14 @@ const execAsync = promisify(exec);
 
 export class ShellResolver {
   static async resolve(): Promise<ResolvedShell[]> {
-    const platform = process.platform;
-    const resolver = platform === "win32" ? "where.exe" : "which";
-
     const results: ResolvedShell[] = [];
 
     for (const profile of SHELL_PROFILES) {
       try {
-        const command = `${resolver} ${profile.command}`;
+        const command =
+          process.platform === "win32"
+            ? `where.exe ${profile.command}`
+            : `sh -c "command -v ${profile.command}"`;
 
         const { stdout } = await execAsync(command);
 

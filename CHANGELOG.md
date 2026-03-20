@@ -28,6 +28,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 - Updated `bash` and `zsh` arguments to `["-i", "-c"]` to cleanly load user configurations (`.bashrc`, `.zshrc`, `nvm`)
 - Improved process termination on POSIX by using detached process groups (`process.kill(-pid)`) so that `SIGTERM` kills the whole tree and prevents orphans
 - Updated `ExecutionEngine.test.ts` to dynamically find a shell path using `ShellResolver` rather than hardcoding paths
+- Replaced the deprecated `which` command with POSIX standard `command -v` for shell resolution on Linux and macOS
 
 ## [0.0.1] - 2026-02-22
 
