@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
@@ -8,19 +8,24 @@ import {
   BlockCompletePayload,
   ExecutionCallbacks,
 } from "../extension/services/ExecutionEngine";
+import { ShellResolver } from "../extension/services/ShellResolver";
 import { OutputLine, ResolvedShell } from "../types/MessageProtocol";
 
 const IS_WIN = process.platform === "win32";
 
-/** Resolved shell for the current platform (no id/label needed at runtime, but typed for consistency). */
-const SHELL: ResolvedShell = IS_WIN
-  ? {
-      id: "powershell",
-      label: "PowerShell",
-      path: "powershell.exe",
-      args: ["-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"],
-    }
-  : { id: "bash", label: "Bash", path: "/usr/bin/bash", args: ["-ic"] };
+let SHELL: ResolvedShell;
+
+beforeAll(async () => {
+  const shells = await ShellResolver.resolve();
+  const targetId = IS_WIN ? "powershell" : "bash";
+  const found = shells.find(
+    (s) => s.id === targetId || (IS_WIN && s.id === "pwsh")
+  );
+  if (!found) {
+    throw new Error(`Could not find a valid shell (${targetId}) for testing.`);
+  }
+  SHELL = found;
+});
 
 const CWD = os.tmpdir();
 
