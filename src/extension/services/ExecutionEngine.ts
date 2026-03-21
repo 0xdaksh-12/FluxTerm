@@ -194,8 +194,16 @@ export class ExecutionEngine {
     try {
       if (process.platform === "win32") {
         // Kill the entire process tree so child processes don't linger
-        spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
+        const killer = spawn("taskkill", ["/pid", String(pid), "/f", "/t"], {
           windowsHide: true,
+        });
+        killer.on("close", (code) => {
+          if (code !== 0) {
+            Ext.warn(`[ExecutionEngine] taskkill failed with code ${code} for block ${blockId}`);
+          }
+        });
+        killer.on("error", (err) => {
+          Ext.error(`[ExecutionEngine] Failed to spawn taskkill for block ${blockId}:`, err);
         });
       } else {
         process.kill(-pid, "SIGTERM");
@@ -253,7 +261,7 @@ export class ExecutionEngine {
     for (const line of lines) {
       if (line.startsWith(META_PREFIX)) {
         // Parse and store meta; don't surface to output
-        const parsed = this.parseMetaLine(line);
+        const parsed = this.parseMetaLine(line, blockId);
         if (parsed) {
           record.meta = parsed;
         }
@@ -331,7 +339,7 @@ export class ExecutionEngine {
    * Decode a base64-encoded JSON meta line emitted by the shell wrapper.
    * Returns null if the line is malformed.
    */
-  private parseMetaLine(line: string): ParsedMeta | null {
+  private parseMetaLine(line: string, blockId: string): ParsedMeta | null {
     if (!line.startsWith(META_PREFIX)) {
       return null;
     }
@@ -339,7 +347,8 @@ export class ExecutionEngine {
       const encoded = line.slice(META_PREFIX.length).trim();
       const json = Buffer.from(encoded, "base64").toString("utf-8");
       return JSON.parse(json) as ParsedMeta;
-    } catch {
+    } catch (err: any) {
+      Ext.error(`[ExecutionEngine] Failed to parse meta payload for block ${blockId}: ${line}`, err);
       return null;
     }
   }

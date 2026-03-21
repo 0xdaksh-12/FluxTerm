@@ -19,6 +19,8 @@ export function getNonce() {
   return text;
 }
 
+import * as path from "path";
+
 /**
  * Default Shell
  */
@@ -35,7 +37,8 @@ export function getDefaultShell(): ShellProfile {
   const envShell = process.env.SHELL;
 
   if (envShell) {
-    const match = SHELL_PROFILES.find((s) => envShell.includes(s.command));
+    const base = path.basename(envShell).toLowerCase();
+    const match = SHELL_PROFILES.find((s) => s.command.toLowerCase() === base);
     if (match) {
       return match;
     }
