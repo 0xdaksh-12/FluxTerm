@@ -7,9 +7,9 @@ import {
   ExecutionEngine,
   BlockCompletePayload,
   ExecutionCallbacks,
-} from "../extension/services/ExecutionEngine";
-import { ShellResolver } from "../extension/services/ShellResolver";
-import { OutputLine, ResolvedShell } from "../types/MessageProtocol";
+} from "../../extension/services/ExecutionEngine";
+import { ShellResolver } from "../../extension/services/ShellResolver";
+import { OutputLine, ResolvedShell } from "../../types/MessageProtocol";
 
 const IS_WIN = process.platform === "win32";
 

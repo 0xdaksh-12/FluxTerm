@@ -16,5 +16,5 @@
     // "noFallthroughCasesInSwitch": true, /* Report errors for fallthrough cases in switch statement. */
     // "noUnusedParameters": true,  /* Report errors on unused parameters. */
   },
-  "exclude": ["node_modules", "dist", "docs", "vitest.config.mts", "vitest.config.webview.mts"]
+  "exclude": ["node_modules", "dist", "docs", "vitest.config.mts", "vitest.config.webview.mts", "src/tests/unit", "src/tests/integration"]
 }

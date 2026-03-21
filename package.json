@@ -47,8 +47,10 @@
     "pretest": "pnpm run compile-tests && pnpm run compile && pnpm run lint",
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "vscode-test",
-    "test:engine": "vitest run src/test/ExecutionEngine.test.ts"
+    "test": "npm-run-all -p test:*",
+    "test:unit": "vitest run -c vitest.config.mts src/tests/unit",
+    "test:integration": "vitest run -c vitest.config.mts src/tests/integration",
+    "test:extension": "vscode-test"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.18",

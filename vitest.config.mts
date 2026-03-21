@@ -9,8 +9,7 @@ export default defineConfig({
   test: {
     name: "engine",
     environment: "node",
-    include: ["src/test/**/*.test.ts"],
-    // ExecutionEngine spawns real child processes — allow extra time
+    include: ["src/tests/unit/**/*.test.ts", "src/tests/integration/**/*.test.ts"],
     testTimeout: 30_000,
   },
 });

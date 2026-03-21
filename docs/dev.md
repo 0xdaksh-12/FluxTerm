@@ -13,7 +13,7 @@ The architecture is split between three main components:
 **Current Stage of Development**:
 
 - **Shell Resolution**: Implemented but actively being refined toward a single source of truth using the `ResolvedShell` object to eliminate duplicated data.
-- **Testing**: Partially set up. We use Vitest for testing the engine and webview components, and Mocha for the core extension tests.
+- **Testing**: Fully implemented across three distinct layers. Unit tests using Vitest (Node) for pure logic like ExecutionEngine, Integration tests using Vitest (Node) for components like FlowDocumentSession with mocked VS Code APIs, and Extension tests using Mocha and @vscode/test-cli for end-to-end webview lifecycle.
 - **Platform Specifics**: Improvements are in progress, such as utilizing interactive shells for `bash`/`zsh` to preserve user environments (like aliases) while handling TTY limitations gracefully.
 
 ### Recent Fixes & Updates

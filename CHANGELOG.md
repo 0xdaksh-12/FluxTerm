@@ -12,11 +12,16 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Added
 
+- Implemented a comprehensive testing strategy dividing tests into three distinct categories:
+  - Unit Tests (Vitest) in `src/tests/unit` for `ExecutionEngine` and `ShellResolver`
+  - Integration Tests (Vitest) in `src/tests/integration` with mocked VS Code context for `FlowDocumentSession`
+  - Extension Tests (Mocha/@vscode/test-cli) in `src/tests/extension` for `FlowEditorProvider` and webview integration
 - Added "Current Application State and Architecture Overview" to `docs/dev.md` detailing the webview, orchestration, and execution engine architecture.
 - Added `vitest.config.mts` and `vitest.config.webview.mts` to support webview testing using Vitest as per the project rules
 
 ### Changed
 
+- Re-organized test directory from `src/test` to `src/tests/` and updated `Package.json` scripts (`test:unit`, `test:integration`, `test:extension`) to segregate testing environments clearly
 - **Shell architecture refactor** — `ResolvedShell` is now the single runtime shell object end-to-end
   - `FlowBlock.shell`: `string` (path) → `ResolvedShell` (full object frozen at block creation)
   - `FlowContext.shell`: `string | null` → `ResolvedShell | null`
