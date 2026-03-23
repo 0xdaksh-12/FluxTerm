@@ -166,8 +166,6 @@ export class ExecutionEngine {
     }
     try {
       rec.process.stdin.write(text + "\n");
-      // Echo the input line back to the stream so the webview can display it
-      this.callbacks.onStream(blockId, [{ type: "stdin", text }]);
     } catch (err: any) {
       Ext.error(
         `[ExecutionEngine] Failed to write input to block ${blockId}:`,

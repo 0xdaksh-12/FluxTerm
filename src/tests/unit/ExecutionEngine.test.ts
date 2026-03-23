@@ -209,7 +209,7 @@ describe("ExecutionEngine", () => {
   // stdin input / writeInput echo
 
   describe("writeInput", () => {
-    it("sends text to stdin and echoes it with type=stdin", () => {
+    it("sends text to stdin and the process receives it", () => {
       return new Promise<void>((resolve, reject) => {
         const streams: OutputLine[] = [];
         let engine!: ExecutionEngine;
@@ -219,10 +219,15 @@ describe("ExecutionEngine", () => {
             streams.push(...lines);
           },
           onComplete: () => {
-            const stdinLines = streams.filter((l) => l.type === "stdin");
             try {
-              expect(stdinLines.length).toBeGreaterThan(0);
-              expect(stdinLines[0].text).toBe("hello-stdin");
+              // stdin is no longer echoed as a visible line — only stdout/stderr appear
+              const stdinLines = streams.filter((l) => l.type === "stdin");
+              expect(stdinLines.length).toBe(0);
+              // cat should have echoed the input back via stdout
+              const stdoutTexts = streams
+                .filter((l) => l.type === "stdout")
+                .map((l) => l.text);
+              expect(stdoutTexts.some((t) => t.includes("hello-stdin"))).toBe(true);
               resolve();
             } catch (e) {
               reject(e);
@@ -233,7 +238,7 @@ describe("ExecutionEngine", () => {
 
         engine = new ExecutionEngine(callbacks);
 
-        // Use cat (reads stdin until EOF) — write a line and then close stdin
+        // cat echoes stdin back to stdout — write a line then kill
         const cmd = IS_WIN ? "$input | ForEach-Object { $_ }" : "cat";
         engine.execute("stdin-test", cmd, SHELL, CWD);
 
