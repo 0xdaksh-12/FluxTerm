@@ -8,6 +8,7 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ### Fixed
 
+- Refactored `ExecutionEngine.handleChunk` stream pipeline to immediately emit trailing partial segments (text after the last newline in a chunk) instead of buffering them until the next newline arrives. Previously: partial remainder was always held in the buffer → prompt text from `input("Enter: ")` was never shown until user typed and pressed Enter. Now: if a chunk's final segment is non-empty (no trailing `\n`), it is flushed as a visible output line and the remainder is cleared, enabling real-time display of interactive prompts without a PTY. Complete lines and meta-sentinel interception are unaffected. `flushRemainders()` is guarded against double-emission because the cleared buffer means it has nothing left to flush for that segment.
 - Refactored `ExecutionEngine` output handling to process stdout/stderr internally as raw `Buffer` streams instead of utf-8 chunked strings. This fixes a critical flaw where ANSI escape sequences were randomly truncated or split across data chunks during real-time emission, causing consistent CSS/style breakage in the webview. It also handles incomplete UTF-8 bytes tracking natively.
 - Removed hardcoded `--color=always | cat -v` in `ExecutionEngine.ts` to fix broken terminal color rendering and prevent raw ANSI escape codes from cluttering output.
 - Removed `-i` flag from bash and zsh shell profiles in `constants.ts` to prevent "cannot set terminal process group" and "no job control" warnings in non-TTY pipe environments.

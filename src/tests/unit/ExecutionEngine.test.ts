@@ -245,6 +245,26 @@ describe("ExecutionEngine", () => {
     });
   });
 
+  // Partial output flushing (prompt-like text without newline)
+  describe("partial output (prompt) flushing", () => {
+    it("emits partial stdout without trailing newline as soon as it arrives", async () => {
+      // printf without \\n produces a partial line — simulates a prompt
+      const cmd = IS_WIN
+        ? "Write-Host -NoNewline 'prompt-text'"
+        : "printf 'prompt-text'";
+
+      const { streams, complete } = await runBlock(cmd);
+
+      const stdoutTexts = streams
+        .filter((l) => l.type === "stdout")
+        .map((l) => l.text);
+
+      // The partial segment must be present in the streamed output
+      expect(stdoutTexts.some((t) => t.includes("prompt-text"))).toBe(true);
+      expect(complete?.exitCode).toBe(0);
+    });
+  });
+
   // Kill process
   describe("killBlock", () => {
     it("kills a running process and emits status=killed", () => {

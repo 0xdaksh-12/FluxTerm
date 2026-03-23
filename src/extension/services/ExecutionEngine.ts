@@ -104,6 +104,7 @@ export class ExecutionEngine {
         cwd: normalizeCwd(cwd),
         env: {
           ...process.env,
+          PYTHONUNBUFFERED: "1",
           FORCE_COLOR: "1",
           CLICOLOR_FORCE: "1",
           COLORTERM: "truecolor",
@@ -242,11 +243,12 @@ export class ExecutionEngine {
    */
   private findSafeSplitIndex(buf: Buffer): number {
     const limit = Math.max(0, buf.length - 100);
-    
+
     // 1. Check for incomplete ANSI escape sequences (starts with \x1b)
     for (let i = buf.length - 1; i >= limit; i--) {
       if (buf[i] === 0x1b) {
-        if (i + 1 < buf.length && buf[i + 1] === 0x5b) { // CSI: \x1b[
+        if (i + 1 < buf.length && buf[i + 1] === 0x5b) {
+          // CSI: \x1b[
           let complete = false;
           for (let j = i + 2; j < buf.length; j++) {
             const charCode = buf[j];
@@ -271,13 +273,19 @@ export class ExecutionEngine {
       if ((byte & 0xc0) === 0x80) {
         continue; // Continuation byte
       } else if ((byte & 0xe0) === 0xc0) {
-        if (buf.length - i < 2) { return i; }
+        if (buf.length - i < 2) {
+          return i;
+        }
         break;
       } else if ((byte & 0xf0) === 0xe0) {
-        if (buf.length - i < 3) { return i; }
+        if (buf.length - i < 3) {
+          return i;
+        }
         break;
       } else if ((byte & 0xf8) === 0xf0) {
-        if (buf.length - i < 4) { return i; }
+        if (buf.length - i < 4) {
+          return i;
+        }
         break;
       } else {
         break; // 1-byte ASCII or other valid start, stop checking
@@ -300,8 +308,21 @@ export class ExecutionEngine {
 
   /**
    * Process an incoming data chunk from stdout or stderr.
-   * Parses complete lines after verifying safe byte boundaries.
-   * The remainder safely stays in the byte buffer.
+   *
+   * Strategy:
+   *  - Accumulate bytes in the remainder buffer as before.
+   *  - Find a byte-safe split index (ANSI / UTF-8 boundary).
+   *  - Split the safe region on newlines to obtain *complete* lines and a
+   *    possible *trailing partial segment* (text after the last newline, with
+   *    no terminating newline yet).
+   *  - Emit all non-empty complete lines as usual, intercepting meta lines.
+   *  - If the trailing segment is non-empty **and** the original chunk did
+   *    NOT end with a newline (i.e. the process emitted a prompt without `\n`),
+   *    flush it immediately as a visible line and clear the remainder buffer.
+   *    This makes interactive prompts (e.g. `input("Enter: ")`) visible in the
+   *    webview without waiting for the user to press Enter.
+   *  - If the trailing segment is empty (chunk ended with `\n`), keep the
+   *    buffer empty — behaviour identical to before.
    */
   private handleChunk(
     blockId: string,
@@ -313,21 +334,28 @@ export class ExecutionEngine {
     record[key] = Buffer.concat([record[key], chunk]);
 
     const safeIndex = this.findSafeSplitIndex(record[key]);
-    if (safeIndex === 0) { return; }
+    if (safeIndex === 0) {
+      return;
+    }
 
     const safeBuf = record[key].subarray(0, safeIndex);
     const safeString = safeBuf.toString("utf-8");
 
-    const lines = safeString.split(/\r?\n/);
-    const incompleteLine = lines.pop() ?? "";
+    // Split into lines. `parts` always has at least one element.
+    // parts[0..n-2] are complete lines (terminated by \n).
+    // parts[n-1]    is the trailing partial segment (may be "").
+    const parts = safeString.split(/\r?\n/);
+    const completeLines = parts.slice(0, -1);
+    const trailingSegment = parts[parts.length - 1];
+
+    // Bytes after the safe split point stay in the buffer regardless.
     const remainingUnsafeBuf = record[key].subarray(safeIndex);
 
-    record[key] = Buffer.concat([Buffer.from(incompleteLine, "utf-8"), remainingUnsafeBuf]);
-
     const visible: OutputLine[] = [];
-    for (const line of lines) {
+
+    // --- Process complete lines (unchanged behaviour) ---
+    for (const line of completeLines) {
       if (line.startsWith(META_PREFIX)) {
-        // Parse and store meta; don't surface to output
         const parsed = this.parseMetaLine(line, blockId);
         if (parsed) {
           record.meta = parsed;
@@ -335,6 +363,24 @@ export class ExecutionEngine {
       } else if (line.length > 0) {
         visible.push({ type, text: line });
       }
+    }
+
+    // --- Handle trailing partial segment ---
+    // Emit immediately when non-empty so that prompts like `input("Enter: ")`
+    // are displayed in real-time instead of stalling until the next newline.
+    // Meta lines should never appear as partial segments in practice, but
+    // guard against it anyway to avoid leaking sentinel text.
+    if (trailingSegment.length > 0 && !trailingSegment.startsWith(META_PREFIX)) {
+      visible.push({ type, text: trailingSegment });
+      // Clear the partial segment from the remainder so it is not re-emitted
+      // when flushRemainders() is called on process close.
+      record[key] = remainingUnsafeBuf;
+    } else {
+      // No partial segment (or empty) — keep prior buffering behaviour.
+      record[key] = Buffer.concat([
+        Buffer.from(trailingSegment, "utf-8"),
+        remainingUnsafeBuf,
+      ]);
     }
 
     if (visible.length > 0) {
@@ -529,7 +575,7 @@ class PosixAdapter extends ShellAdapter {
       `  __rc=$?`,
       `fi`,
       `rm -f "$__FLOW_TMP"`,
-      `exit $__rc`
+      `exit $__rc`,
     ].join("\n");
   }
 
