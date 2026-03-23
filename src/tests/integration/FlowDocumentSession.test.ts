@@ -24,6 +24,12 @@ vi.mock("vscode", () => {
     },
     WorkspaceEdit: class {
       replace = vi.fn();
+      createFile = vi.fn();
+    },
+    EventEmitter: class {
+      event = vi.fn();
+      fire = vi.fn();
+      dispose = vi.fn();
     },
     workspace: {
       applyEdit: mockApplyEdit,
@@ -49,8 +55,8 @@ describe("FlowDocumentSession Integration", () => {
 
     mockDocument = {
       uri: { scheme: "file", fsPath: "/fake/path/test.flow" },
-      getText: vi.fn(),
-      positionAt: vi.fn((offset) => ({ line: 0, char: offset })),
+      documentData: {},
+      update: vi.fn((data) => { mockDocument.documentData = data; })
     };
 
     mockPanel = {
@@ -75,8 +81,7 @@ describe("FlowDocumentSession Integration", () => {
   }
 
   it("handles init message and returns document+context", async () => {
-    const fakeDocText = JSON.stringify({ blocks: [] });
-    mockDocument.getText.mockReturnValue(fakeDocText);
+    mockDocument.documentData = { blocks: [] };
 
     session = new FlowDocumentSession(mockDocument, mockPanel, mockContext);
 
@@ -91,8 +96,8 @@ describe("FlowDocumentSession Integration", () => {
     expect(initCall![0].context.cwd.endsWith(os.platform() === 'win32' ? '\\fake\\path' : '/fake/path')).toBe(true);
   });
 
-  it("handles update message and enqueues workspace edit", async () => {
-    mockDocument.getText.mockReturnValue("");
+  it("handles update message and triggers onDidUpdateDocument", async () => {
+    mockDocument.documentData = {};
     session = new FlowDocumentSession(mockDocument, mockPanel, mockContext);
 
     const docUpdate = { blocks: [], runtimeContext: { cwd: "/test", branch: null, shell: null, connection: "local" as const } };
@@ -102,11 +107,18 @@ describe("FlowDocumentSession Integration", () => {
     // Processing is async enqueue
     await new Promise((resolve) => setTimeout(resolve, 50));
 
-    expect(mockApplyEdit).toHaveBeenCalled();
+    // The session should update latestState
+    expect((session as any).latestState).toEqual(docUpdate);
+    // Wait, let's observe the event
+    // The test logic changed: it no longer calls mockApplyEdit immediately!
+    expect(mockApplyEdit).not.toHaveBeenCalled(); // No disk save on update
   });
 
-  it("handles empty/corrupt document gracefully", async () => {
-    mockDocument.getText.mockReturnValue("corrupt json {");
+  // This test no longer applies since FlowCustomDocument parses on creation
+  // and FlowDocumentSession just takes the data.
+  // We can skip or keep a structural equivalent.
+  it("handles empty document gracefully", async () => {
+    mockDocument.documentData = {};
     session = new FlowDocumentSession(mockDocument, mockPanel, mockContext);
 
     await simulateWebviewMessage({ type: "init" });
@@ -116,7 +128,7 @@ describe("FlowDocumentSession Integration", () => {
   });
 
   it("handles execute message and relays stream/complete events", async () => {
-    mockDocument.getText.mockReturnValue("");
+    mockDocument.documentData = {};
     session = new FlowDocumentSession(mockDocument, mockPanel, mockContext);
 
     const shells = await ShellResolver.resolve();

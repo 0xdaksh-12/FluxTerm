@@ -9,7 +9,11 @@ interface LineProps {
   highlighted: boolean;
 }
 
-const OutputLineRow: React.FC<LineProps> = ({ line, inlineInput, highlighted }) => {
+const OutputLineRow: React.FC<LineProps> = ({
+  line,
+  inlineInput,
+  highlighted,
+}) => {
   const color =
     line.type === "stderr"
       ? "var(--vscode-testing-iconFailed, var(--vscode-terminal-ansiRed, #f14c4c))"
@@ -41,6 +45,7 @@ const OutputLineRow: React.FC<LineProps> = ({ line, inlineInput, highlighted }) 
   );
 };
 
+// Not used any longger
 /** Standalone row for a stdin line that has no preceding prompt to attach to. */
 const StandaloneStdinRow: React.FC<{ text: string; highlighted: boolean }> = ({
   text,
@@ -57,9 +62,7 @@ const StandaloneStdinRow: React.FC<{ text: string; highlighted: boolean }> = ({
   </div>
 );
 
-// ---------------------------------------------------------------------------
 // Build display rows — merge each stdin line onto the preceding output line.
-// ---------------------------------------------------------------------------
 interface DisplayRow {
   line: OutputLine;
   inlineInput?: string;
@@ -92,10 +95,10 @@ function buildDisplayRows(lines: OutputLine[]): DisplayRow[] {
   return rows;
 }
 
-export const OutputArea: React.FC<{ block: FlowBlock; searchQuery: string }> = ({
-  block,
-  searchQuery,
-}) => {
+export const OutputArea: React.FC<{
+  block: FlowBlock;
+  searchQuery: string;
+}> = ({ block, searchQuery }) => {
   if (block.output.length === 0) {
     if (block.status === "running") {
       return (

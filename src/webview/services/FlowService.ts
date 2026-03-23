@@ -61,6 +61,18 @@ class FlowService {
     this.vscode.postMessage({ type: "update", document });
   }
 
+  /**
+   * Respond to a requestSave with the full notebook state.
+   */
+  public sendSaveResponse(document: FlowDocument): void {
+    this.vscode.postMessage({ type: "saveResponse", document });
+  }
+
+  /** Notify extension to mark document as dirty without saving data */
+  public markDirty(): void {
+    this.vscode.postMessage({ type: "markDirty" });
+  }
+
   /** Request the list of shells available on the host machine. */
   public getShellConfig(): void {
     this.vscode.postMessage({ type: "shellConfig" });

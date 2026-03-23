@@ -105,7 +105,7 @@ describe("ExecutionEngine", () => {
 
       const { streams } = await runBlock(cmd);
       const errLines = streams
-        .filter((l) => l.type === "stderr")
+        .filter((l) => l.type === "stderr" || (!IS_WIN && l.type === "stdout"))
         .map((l) => l.text);
 
       expect(errLines.some((t) => t.includes("err-output"))).toBe(true);

@@ -89,6 +89,27 @@ export default function App() {
   //  Wire execution events from extension to notebookStore
   useBlockExecution({ appendOutput, completeBlock, setBlockStatus });
 
+  // Keep a ref to the latest document state for immediate access during requestSave
+  const latestDataRef = useRef({ blocks, runtimeContext, document });
+  useEffect(() => {
+    latestDataRef.current = { blocks, runtimeContext, document };
+  }, [blocks, runtimeContext, document]);
+
+  // Handle requestSave from extension
+  useEffect(() => {
+    const unsubscribe = flowService.subscribe((message: any) => {
+      if (message.type === "requestSave") {
+        const d = latestDataRef.current;
+        flowService.sendSaveResponse({
+          ...d.document,
+          blocks: d.blocks,
+          runtimeContext: d.runtimeContext,
+        });
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Inject CSS animations once
   const styleInjected = useRef(false);
   if (!styleInjected.current) {
@@ -148,22 +169,6 @@ export default function App() {
     });
   };
 
-  const handleSave = useCallback(() => {
-    saveDocument(blocks, runtimeContext);
-  }, [blocks, runtimeContext, saveDocument]);
-
-  // Global save shortcut (Ctrl+S / Cmd+S)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        handleSave();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [handleSave]);
-
   const safeBlocks = Array.isArray(blocks) ? blocks : [];
   const isAnyRunning = safeBlocks.some((b) => b.status === "running");
 
@@ -199,7 +204,10 @@ export default function App() {
             <div key={block.id}>
               <OutputBlock
                 block={block}
-                onDelete={deleteBlock}
+                onDelete={(id) => {
+                  deleteBlock(id);
+                  flowService.markDirty();
+                }}
                 onReRun={handleReRun}
               />
               {idx < safeBlocks.length - 1 && (

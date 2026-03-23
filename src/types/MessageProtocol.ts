@@ -107,6 +107,10 @@ export type WebviewMessage =
   | { type: "shellConfig" }
   /** Forward a webview console log to the extension output channel. */
   | { type: "log"; message: string }
+  /** Respond to a requestSave with the complete current state */
+  | { type: "saveResponse"; document: FlowDocument }
+  /** Notify the extension that the document has changed in-memory and should be marked dirty */
+  | { type: "markDirty" }
   /** Start executing a command in a new isolated shell process. */
   | {
       type: "execute";
@@ -132,6 +136,8 @@ export type ExtMessage =
   | { type: "init"; document: FlowDocument; context: FlowContext }
   /** Available shells resolved from the host machine. */
   | { type: "shellList"; shells: ResolvedShell[] }
+  /** Request the webview to send back its latest document state for saving. */
+  | { type: "requestSave" }
   /** Streamed stdout/stderr lines from a running block. */
   | { type: "stream"; blockId: string; lines: OutputLine[] }
   /** Block process completed (done, error, or killed). */
