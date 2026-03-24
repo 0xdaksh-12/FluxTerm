@@ -14,6 +14,15 @@ export class FluxTermEditorProvider implements vscode.CustomEditorProvider<FluxT
 
   constructor(private readonly context: vscode.ExtensionContext) {}
 
+  public getSessionForUri(uri: vscode.Uri): FluxTermDocumentSession | undefined {
+    for (const session of this.sessions.values()) {
+      if (session.document.uri.toString() === uri.toString()) {
+        return session;
+      }
+    }
+    return undefined;
+  }
+
   public async openCustomDocument(
     uri: vscode.Uri,
     openContext: vscode.CustomDocumentOpenContext,

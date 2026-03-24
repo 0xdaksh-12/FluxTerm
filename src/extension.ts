@@ -21,8 +21,8 @@ export function activate(context: vscode.ExtensionContext) {
   // Register command to create new .ftx file
   const newFileCommand = vscode.commands.registerCommand(
     "fluxterm.newFile",
-    async () => {
-      const uri = await vscode.window.showSaveDialog({
+    async (uriArg?: vscode.Uri) => {
+      const uri = uriArg && uriArg instanceof vscode.Uri ? uriArg : await vscode.window.showSaveDialog({
         filters: { "FluxTerm Files": ["ftx"] },
         defaultUri: vscode.Uri.file("untitled.ftx"),
       });
@@ -54,6 +54,10 @@ export function activate(context: vscode.ExtensionContext) {
     });
     context.subscriptions.push(watcher);
   }
-}
 
+  // Return API for headess E2E electron testing 
+  return {
+    getProvider: () => provider,
+  };
+}
 export function deactivate() {}

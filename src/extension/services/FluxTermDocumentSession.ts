@@ -62,13 +62,24 @@ export class FluxTermDocumentSession {
     this.setupMessageHandlers();
   }
 
+  public readonly onDidPostMessage = new vscode.EventEmitter<ExtMessage>();
+
   // Webview Message Handling
   private setupMessageHandlers() {
     this.panel.webview.onDidReceiveMessage(
-      async (message: WebviewMessage) => {
-        if (this.isDisposed) {
-          return;
-        }
+      (msg) => this.processWebviewMessage(msg),
+      null,
+      this.disposables,
+    );
+
+    // Dispose the session when the panel is closed.
+    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
+  }
+
+  public async processWebviewMessage(message: WebviewMessage) {
+    if (this.isDisposed) {
+      return;
+    }
 
         switch (message.type) {
           case "init": {
@@ -159,13 +170,6 @@ export class FluxTermDocumentSession {
           default:
             break;
         }
-      },
-      null,
-      this.disposables,
-    );
-
-    // Dispose the session when the panel is closed.
-    this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
   }
 
   /**
@@ -299,6 +303,16 @@ export class FluxTermDocumentSession {
    * Guards against posting after the panel has been disposed.
    */
   private post(message: ExtMessage) {
+    if (!this.isDisposed) {
+      this.onDidPostMessage.fire(message);
+      this.panel.webview.postMessage(message);
+    }
+  }
+
+  /**
+   * Post a custom message directly to the webview (used for programmatic E2E testing).
+   */
+  public postToWebview(message: any) {
     if (!this.isDisposed) {
       this.panel.webview.postMessage(message);
     }

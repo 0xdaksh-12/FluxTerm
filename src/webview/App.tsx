@@ -128,7 +128,7 @@ export default function App() {
     connection: runtimeContext.connection ?? "local",
   };
 
-  const handleRun = (cmd: string) => {
+  const handleRun = useCallback((cmd: string) => {
     const shell = displayContext.shell;
     if (!shell) {
       return;
@@ -140,7 +140,24 @@ export default function App() {
       displayContext.branch ?? null,
     );
     fluxTermService.execute(blockId, cmd, shell, displayContext.cwd);
-  };
+  }, [displayContext, createBlock]);
+
+  // E2E testing hook to allow headless runner to inject interactions visually into React
+  useEffect(() => {
+    const handleTestMessage = (e: MessageEvent<any>) => {
+      const msg = e.data;
+      if (msg.type === "testRunCommand" && msg.command) {
+        handleRun(msg.command);
+      } else if (msg.type === "testInputText" && msg.text) {
+        const runningBlock = Array.isArray(blocks) ? blocks.find((b) => b.status === "running") : null;
+        if (runningBlock) {
+          fluxTermService.sendInput(runningBlock.id, msg.text);
+        }
+      }
+    };
+    window.addEventListener("message", handleTestMessage);
+    return () => window.removeEventListener("message", handleTestMessage);
+  }, [handleRun, blocks]);
 
   const handleReRun = (blockId: string) => {
     const orig = blocks.find((b) => b.id === blockId);
