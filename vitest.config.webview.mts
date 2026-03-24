@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import path from "path";
 
 /**
  * Vitest config for React / DOM webview tests.
@@ -12,5 +13,10 @@ export default defineConfig({
     include: ["src/webview/tests/**/*.test.{ts,tsx}"],
     setupFiles: ["src/webview/tests/setup.ts"],
     globals: true,
+  },
+  resolve: {
+    alias: {
+      "@vscode/codicons": path.resolve(__dirname, "src/webview/tests/mocks/codicons.ts"),
+    },
   },
 });

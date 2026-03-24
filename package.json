@@ -63,7 +63,8 @@
     "test": "npm-run-all -p test:*",
     "test:unit": "vitest run -c vitest.config.mts src/tests/unit",
     "test:integration": "vitest run -c vitest.config.mts src/tests/integration",
-    "test:extension": "vscode-test"
+    "test:extension": "vscode-test",
+    "test:webview": "vitest run -c vitest.config.webview.mts"
   },
   "devDependencies": {
     "@tailwindcss/cli": "^4.2.2",
