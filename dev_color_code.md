@@ -50,3 +50,11 @@
 - Selection(--vscode-editor-selectionBackground): #245c74
 - Cursor(--vscode-editorCursor-foreground): #ffff4d
 - Line Highlight(--vscode-editor-lineHighlightBackground): #242526
+- Font Family(--vscode-font-family): system-ui, "Ubuntu", "Droid Sans", sans-serif
+- Font Size(--vscode-font-size): 13px
+- Editor Font(--vscode-editor-font-family): 'FiraCode Nerd Font'
+- Text Link Fg(--vscode-textLink-foreground): #48a0c7
+- Text Link Active Fg(--vscode-textLink-activeForeground): #53a5ca
+- Scrollbar Slider(--vscode-scrollbarSlider-background): rgba(131, 132, 133, 0.2)
+- Scrollbar Hover(--vscode-scrollbarSlider-hoverBackground): rgba(131, 132, 133, 0.4)
+- Scrollbar Active(--vscode-scrollbarSlider-activeBackground): rgba(131, 132, 133, 0.6)
