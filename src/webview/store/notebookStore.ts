@@ -36,6 +36,7 @@ export interface UseNotebookReturn {
     shell: ResolvedShell,
     cwd: string,
     branch: string | null,
+    documentId?: string,
   ) => string;
   appendOutput: (blockId: string, lines: OutputLine[]) => void;
   setBlockStatus: (blockId: string, status: BlockStatus) => void;
@@ -60,6 +61,7 @@ export interface UseNotebookReturn {
     shell: ResolvedShell,
     cwd: string,
     branch: string | null,
+    documentId?: string,
   ) => string;
   /**
    * Atomically promote an idle block to running.
@@ -131,6 +133,7 @@ export function useNotebook(
       shell: ResolvedShell,
       cwd: string,
       branch: string | null,
+      documentId?: string,
     ): string => {
       const id = generateId();
       setState((prev) =>
@@ -144,6 +147,7 @@ export function useNotebook(
             shell, // frozen at creation
             cwd, // frozen at creation
             branch, // frozen at creation
+            documentId,
             status: "running",
             output: [],
             exitCode: null,
@@ -268,7 +272,7 @@ export function useNotebook(
       if (!block) {
         return null;
       }
-      return createBlock(block.command, block.shell, block.cwd, block.branch);
+      return createBlock(block.command, block.shell, block.cwd, block.branch, block.documentId);
     },
     [state.blocks, createBlock],
   );
@@ -284,6 +288,7 @@ export function useNotebook(
       shell: ResolvedShell,
       cwd: string,
       branch: string | null,
+      documentId?: string,
     ): string => {
       const id = generateId();
       setState((prev) =>
@@ -299,6 +304,7 @@ export function useNotebook(
             shell,
             cwd,
             branch,
+            documentId,
             status: "idle",
             output: [],
             exitCode: null,

@@ -9,6 +9,8 @@ This format follows rigorous open-source repository management standards.
 
 - **webview**: Complete UI architecture refactor replacing the two-zone layout (block history list + fixed bottom `InputSection`) with a continuous notebook model. Every block is a self-contained card (`Block`) containing its own context bar, command textarea, output area, and stdin prompt. A persistent ghost block always sits at the end of each document group as the command entry surface.
 - **webview**: Introduced `BlockDocument` — a document-level group wrapper with a double-click-editable group name and a "Run All" button.
+- **webview**: Multi-document model: the webview now supports multiple named `BlockDocument` groups. Each block is tagged with a `documentId` (stored in `FluxTermBlock`), and the `FluxTermDocument` persists a `documents` array of `{id, name}` metadata. Renaming a document immediately persists via `updateDocument`.
+- **webview**: Ghost `BlockDocument` — a visually dimmed, non-editable document card always rendered at the bottom of the page. Submitting a command inside it creates a new real `BlockDocument` group and assigns the block to it. The ghost doc never appears in the store.
 - **webview**: Context bar on each block dynamically swaps between shell/branch/path and a spinning "Running" indicator during execution.
 - **webview**: Floating action toolbar (Add, Stop/Refresh, Search, Delete, Drag, More) appears on card hover via CSS using the new `block-tb-btn` utility class.
 - **webview**: Added `spliceBlockAfter` store action — inserts an idle block immediately after a target block to power the Add button. Added `promoteIdleBlock` store action — atomically freezes command, shell, cwd, branch and flips status to running.
@@ -21,6 +23,9 @@ This format follows rigorous open-source repository management standards.
 
 ### Bug Fixes
 
+- **webview**: Fixed `BlockDocument` name not persisting — `onGroupNameChange` is now wired to `updateDocument` in `App.tsx` and the `documents` array is included in every `saveResponse`.
+- **webview**: Fixed non-scrollable webview — removed the `h-screen` + `overflow-y-auto` fixed-height container. The page now grows naturally with content; `html` and `body` have `overflow-y: auto` and `height: 100%` in `styles.css`.
+- **webview**: Capped `OutputArea` height at `300px` with `overflow-y: auto` so long command outputs don't push the entire layout off-screen.
 - **storybook**: Renamed `vsTheme.ts` to `vsTheme.mts` to resolve a TypeScript ESM/CJS module mismatch. Under `moduleResolution: Node16`, importing from the pure-ESM `@storybook/react-vite` package inside a file treated as CommonJS (due to no `"type": "module"` in `package.json`) raised a `resolution-mode` attribute error. The `.mts` extension explicitly signals ESM to TypeScript regardless of `package.json#type`.
 - **webview**: Resolved an issue where codicons failed to load in development by conditionally resolving the webview URI based on the extension mode.
 - **engine**: Removed unintended `stdin` echoes in `writeInput` to prevent duplicate terminal outputs.

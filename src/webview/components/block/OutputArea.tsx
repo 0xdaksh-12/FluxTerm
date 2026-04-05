@@ -156,7 +156,10 @@ export const OutputArea: React.FC<{
         lineHeight: "1.5",
         whiteSpace: "pre-wrap",
         wordBreak: "break-all",
-        color: "var(--vscode-terminal-background)",
+        color: "var(--vscode-terminal-foreground, var(--vscode-editor-foreground))",
+        maxHeight: "300px",
+        overflowY: "auto",
+        overflowX: "hidden",
       }}
     >
       {rows.map((row, i) => {

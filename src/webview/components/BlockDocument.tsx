@@ -11,6 +11,12 @@ interface BlockDocumentProps {
   isAnyRunning?: boolean;
   /** Triggered by the "Run All" button. */
   onRunAll?: () => void;
+  /**
+   * When true, renders as a ghost/placeholder document.
+   * The card is dimmed, the name is not editable, and the Run All button
+   * is hidden. Activates when the user submits a command in its ghost block.
+   */
+  isGhost?: boolean;
   children: React.ReactNode;
 }
 
@@ -28,6 +34,7 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
   onGroupNameChange,
   isAnyRunning = false,
   onRunAll,
+  isGhost = false,
   children,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
@@ -63,10 +70,12 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
     <div
       style={{
         backgroundColor: "var(--vscode-input-background)",
-        border: "1px solid var(--vscode-panel-border)",
+        border: `1px solid var(--vscode-panel-border)`,
         borderRadius: "4px",
         overflow: "hidden",
         width: "100%",
+        opacity: isGhost ? 0.5 : 1,
+        transition: "opacity 150ms",
       }}
     >
       {/* Document header bar */}
@@ -120,59 +129,63 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
                 color: "var(--vscode-foreground)",
                 fontSize: "12px",
                 fontWeight: 500,
-                cursor: "text",
+                cursor: isGhost ? "default" : "text",
+                fontStyle: isGhost ? "italic" : undefined,
+                opacity: isGhost ? 0.7 : 1,
               }}
-              title="Double-click to rename"
-              onDoubleClick={() => setIsEditing(true)}
+              title={isGhost ? "Type a command to start a new document" : "Double-click to rename"}
+              onDoubleClick={() => { if (!isGhost) setIsEditing(true); }}
             >
               {groupName}
             </span>
           )}
         </div>
 
-        {/* Right: Run All button */}
-        <button
-          onClick={onRunAll}
-          disabled={isAnyRunning}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            backgroundColor: isAnyRunning
-              ? "var(--vscode-button-secondaryBackground)"
-              : "var(--vscode-button-background)",
-            color: isAnyRunning
-              ? "var(--vscode-button-secondaryForeground)"
-              : "var(--vscode-button-foreground)",
-            border: "none",
-            padding: "0 12px",
-            gap: "6px",
-            height: "24px",
-            borderRadius: "2px",
-            cursor: isAnyRunning ? "not-allowed" : "pointer",
-            fontWeight: "bold",
-            fontSize: "11px",
-            fontFamily: "var(--vscode-font-family)",
-            opacity: isAnyRunning ? 0.6 : 1,
-            transition: "opacity 150ms",
-          }}
-          onMouseEnter={(e) => {
-            if (!isAnyRunning)
-              e.currentTarget.style.backgroundColor =
-                "var(--vscode-button-hoverBackground)";
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.backgroundColor = isAnyRunning
-              ? "var(--vscode-button-secondaryBackground)"
-              : "var(--vscode-button-background)";
-          }}
-        >
-          <span
-            className="codicon codicon-run-all"
-            style={{ fontSize: "14px" }}
-          />
-          Run All
-        </button>
+        {/* Right: Run All button — hidden on ghost documents */}
+        {!isGhost && (
+          <button
+            onClick={onRunAll}
+            disabled={isAnyRunning}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              backgroundColor: isAnyRunning
+                ? "var(--vscode-button-secondaryBackground)"
+                : "var(--vscode-button-background)",
+              color: isAnyRunning
+                ? "var(--vscode-button-secondaryForeground)"
+                : "var(--vscode-button-foreground)",
+              border: "none",
+              padding: "0 12px",
+              gap: "6px",
+              height: "24px",
+              borderRadius: "2px",
+              cursor: isAnyRunning ? "not-allowed" : "pointer",
+              fontWeight: "bold",
+              fontSize: "11px",
+              fontFamily: "var(--vscode-font-family)",
+              opacity: isAnyRunning ? 0.6 : 1,
+              transition: "opacity 150ms",
+            }}
+            onMouseEnter={(e) => {
+              if (!isAnyRunning)
+                e.currentTarget.style.backgroundColor =
+                  "var(--vscode-button-hoverBackground)";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = isAnyRunning
+                ? "var(--vscode-button-secondaryBackground)"
+                : "var(--vscode-button-background)";
+            }}
+          >
+            <span
+              className="codicon codicon-run-all"
+              style={{ fontSize: "14px" }}
+            />
+            Run All
+          </button>
+        )}
       </div>
 
       {/* Block list */}

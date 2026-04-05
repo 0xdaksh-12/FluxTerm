@@ -20,6 +20,12 @@ export interface FluxTermBlock {
   /** The command string the user submitted. */
   command: string;
 
+  /**
+   * ID of the BlockDocument this block belongs to.
+   * Blocks without a documentId belong to the default (first) document.
+   */
+  documentId?: string;
+
   // Frozen at creation
   /** Resolved shell used when this block was created (path + args frozen together). */
   shell: ResolvedShell;
@@ -65,6 +71,12 @@ export interface FluxTermContext {
  * Persistence is explicit and controlled — never triggered by streaming events.
  * Blocks and runtimeContext are optional so new/empty files parse gracefully.
  */
+/** Metadata for a named document group (BlockDocument). */
+export interface BlockDocumentMeta {
+  id: string;
+  name: string;
+}
+
 export interface FluxTermDocument {
   /** Saved block list. Populated on explicit save only. */
   blocks?: FluxTermBlock[];
@@ -76,6 +88,8 @@ export interface FluxTermDocument {
   cwd?: string;
   /** Preferred branch label, for display purposes only. */
   branch?: string;
+  /** Named document groups (BlockDocuments) — persisted on name change. */
+  documents?: BlockDocumentMeta[];
 }
 
 // Shell Config
