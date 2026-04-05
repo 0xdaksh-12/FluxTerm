@@ -7,6 +7,7 @@ This format follows rigorous open-source repository management standards.
 
 ### Features
 
+- **webview**: Fully refactored `workspace.tsx` into a modular `MockDocument` and `MockInputSection` architecture. Replaced all duplicate block code with flexible layouts that support execution states (`idle`, `running`, `done`), interactive multiline input mockups, STDIN blocking components, and native VS Code indicator alignments.
 - **webview**: Added a beautifully styled UI representation of an interactive notebook shell below executed blocks in `App.tsx`.
 - **engine**: Implemented Native Terminal Emulator PTY integration (`script` wrapper) on Unix systems to trick terminal binaries into rendering standard color ANSI strings dynamically.
 - **webview**: Included complete ANSI terminal color scheme visualization in the `ColorBlock` component.

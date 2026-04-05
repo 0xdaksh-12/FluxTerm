@@ -1,10 +1,10 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
-import Block from "./block";
 import { varControl, withVarOverrides } from "../../../storybook/vsTheme.mts";
+import workspace from "./workspace";
 
 const meta: Meta = {
-  title: "Blocks/Block",
-  component: Block,
+  title: "Blocks/Workspace",
+  component: workspace,
   parameters: { layout: "fullscreen" },
 
   argTypes: {
