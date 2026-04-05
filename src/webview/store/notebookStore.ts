@@ -50,6 +50,29 @@ export interface UseNotebookReturn {
   reRunBlock: (blockId: string) => string | null;
   setRuntimeContext: (ctx: FluxTermContext) => void;
   resetNotebook: (blocks: FluxTermBlock[], runtimeContext: FluxTermContext) => void;
+  /**
+   * Insert a new idle block immediately after `afterBlockId`.
+   * If `afterBlockId` is not found, appends to the end.
+   * Returns the new block's id.
+   */
+  spliceBlockAfter: (
+    afterBlockId: string,
+    shell: ResolvedShell,
+    cwd: string,
+    branch: string | null,
+  ) => string;
+  /**
+   * Atomically promote an idle block to running.
+   * Sets command, shell, cwd, branch, and status in one Immer pass.
+   * Must be called just before dispatching `fluxTermService.execute`.
+   */
+  promoteIdleBlock: (
+    blockId: string,
+    command: string,
+    shell: ResolvedShell,
+    cwd: string,
+    branch: string | null,
+  ) => void;
 }
 
 /**
@@ -250,6 +273,74 @@ export function useNotebook(
     [state.blocks, createBlock],
   );
 
+  /**
+   * Insert a new idle block immediately after `afterBlockId`.
+   * The seq is set to `blockSeq + 1` so it sorts after all existing blocks;
+   * the block array is spliced at the correct index to maintain sort stability.
+   */
+  const spliceBlockAfter = useCallback(
+    (
+      afterBlockId: string,
+      shell: ResolvedShell,
+      cwd: string,
+      branch: string | null,
+    ): string => {
+      const id = generateId();
+      setState((prev) =>
+        produce(prev, (draft) => {
+          const idx = draft.blocks.findIndex((b) => b.id === afterBlockId);
+          const insertAt = idx === -1 ? draft.blocks.length : idx + 1;
+          const seq = draft.blockSeq + 1;
+          draft.blockSeq = seq;
+          draft.blocks.splice(insertAt, 0, {
+            id,
+            seq,
+            command: "",
+            shell,
+            cwd,
+            branch,
+            status: "idle",
+            output: [],
+            exitCode: null,
+            finalCwd: null,
+            finalBranch: null,
+            createdAt: Date.now(),
+          });
+        }),
+      );
+      return id;
+    },
+    [],
+  );
+
+  /**
+   * Atomically promote an idle block to running state.
+   * Freezes command, shell, cwd, branch into the block and sets status = "running".
+   */
+  const promoteIdleBlock = useCallback(
+    (
+      blockId: string,
+      command: string,
+      shell: ResolvedShell,
+      cwd: string,
+      branch: string | null,
+    ): void => {
+      setState((prev) =>
+        produce(prev, (draft) => {
+          const block = draft.blocks.find((b) => b.id === blockId);
+          if (block && block.status === "idle") {
+            block.command = command;
+            block.shell = shell;
+            block.cwd = cwd;
+            block.branch = branch;
+            block.status = "running";
+          }
+        }),
+      );
+    },
+    [],
+  );
+
   return {
     blocks: state.blocks,
     runtimeContext: state.runtimeContext,
@@ -261,5 +352,7 @@ export function useNotebook(
     reRunBlock,
     setRuntimeContext,
     resetNotebook,
+    spliceBlockAfter,
+    promoteIdleBlock,
   };
 }

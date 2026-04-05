@@ -1,5 +1,5 @@
-export { OutputBlock } from "./OutputBlock";
-export type { OutputBlockProps } from "./OutputBlock";
+export { Block } from "./Block";
+export type { BlockProps } from "./Block";
 
 export { StatusIcon } from "./StatusIcon";
 export { ToolbarButton } from "./ToolbarButton";

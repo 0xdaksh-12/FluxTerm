@@ -7,11 +7,17 @@ This format follows rigorous open-source repository management standards.
 
 ### Features
 
+- **webview**: Complete UI architecture refactor replacing the two-zone layout (block history list + fixed bottom `InputSection`) with a continuous notebook model. Every block is a self-contained card (`Block`) containing its own context bar, command textarea, output area, and stdin prompt. A persistent ghost block always sits at the end of each document group as the command entry surface.
+- **webview**: Introduced `BlockDocument` — a document-level group wrapper with a double-click-editable group name and a "Run All" button.
+- **webview**: Context bar on each block dynamically swaps between shell/branch/path and a spinning "Running" indicator during execution.
+- **webview**: Floating action toolbar (Add, Stop/Refresh, Search, Delete, Drag, More) appears on card hover via CSS using the new `block-tb-btn` utility class.
+- **webview**: Added `spliceBlockAfter` store action — inserts an idle block immediately after a target block to power the Add button. Added `promoteIdleBlock` store action — atomically freezes command, shell, cwd, branch and flips status to running.
 - **webview**: Fully refactored `workspace.tsx` into a modular `MockDocument` and `MockInputSection` architecture. Replaced all duplicate block code with flexible layouts that support execution states (`idle`, `running`, `done`), interactive multiline input mockups, STDIN blocking components, and native VS Code indicator alignments.
 - **webview**: Added a beautifully styled UI representation of an interactive notebook shell below executed blocks in `App.tsx`.
 - **engine**: Implemented Native Terminal Emulator PTY integration (`script` wrapper) on Unix systems to trick terminal binaries into rendering standard color ANSI strings dynamically.
 - **webview**: Included complete ANSI terminal color scheme visualization in the `ColorBlock` component.
 - **webview**: Modernized `OutputBlock` and `OutputArea` to strictly map `ansi-to-react` HTML colors to VS Code's native theme CSS tokens (`--vscode-terminal-ansi*`).
+
 
 ### Bug Fixes
 

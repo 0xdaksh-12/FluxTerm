@@ -169,4 +169,32 @@
   .ansi-bright-white-bg {
     background-color: var(--vscode-terminal-ansiBrightWhite);
   }
+
+  /* Block card: show floating toolbar on card hover or keyboard focus */
+  .block-card-wrapper:hover .block-toolbar,
+  .block-toolbar:focus-within {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+
+  /* Icon button inside the floating block toolbar */
+  .block-tb-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 4px;
+    color: var(--vscode-icon-foreground);
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background-color 0.12s ease, color 0.12s ease;
+  }
+
+  .block-tb-btn:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+    color: var(--vscode-foreground);
+  }
 }
