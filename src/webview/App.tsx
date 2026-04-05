@@ -33,7 +33,10 @@ export default function App() {
     context: docContext,
     updateDocument,
   } = useFluxTermDocument();
-  const { shells, selectedShell, setSelectedShell } = useShellConfig();
+
+  // `shells` = list of available shells from the extension.
+  // There is NO global selected shell — each block tracks its own shell locally.
+  const { shells } = useShellConfig();
 
   const {
     blocks,
@@ -43,6 +46,7 @@ export default function App() {
     setBlockStatus,
     completeBlock,
     deleteBlock,
+    deleteBlocksByDocumentId,
     reRunBlock,
     setRuntimeContext,
     resetNotebook,
@@ -55,28 +59,16 @@ export default function App() {
     { id: "default", name: DEFAULT_DOC_NAME },
   ]);
 
-  // Ghost document: trailing entry surface (ghost block command)
+  // Ghost document trailing entry surface
   const [ghostDocCommand, setGhostDocCommand] = useState("");
 
   // Per-document ghost block commands
-  const [ghostCommands, setGhostCommands] = useState<Record<string, string>>(
-    {},
-  );
+  const [ghostCommands, setGhostCommands] = useState<Record<string, string>>({});
 
   // Sync runtime context from extension init
   useEffect(() => {
     setRuntimeContext(docContext);
   }, [docContext, setRuntimeContext]);
-
-  // Restore saved shell preference
-  useEffect(() => {
-    if (shells.length === 0) return;
-    if (document.shell) {
-      const saved = shells.find((s) => s.id === document.shell);
-      if (saved) { setSelectedShell(saved); return; }
-    }
-    if (!selectedShell) setSelectedShell(shells[0]);
-  }, [shells, document.shell]);
 
   // Restore saved blocks + documents from previously saved .ftx session
   useEffect(() => {
@@ -124,20 +116,16 @@ export default function App() {
     window.document.head.appendChild(style);
   }
 
-  // Merged display context for the context bar
-  const displayContext: FluxTermContext = {
-    cwd: runtimeContext.cwd || document.cwd || "",
-    branch: runtimeContext.branch ?? document.branch ?? null,
-    shell: selectedShell,
+  // Base context (cwd/branch from runtime — NO global shell).
+  // Each block has its own shell tracked locally in Block.tsx.
+  const baseContext: FluxTermContext = {
+    cwd: runtimeContext.cwd || docContext.cwd || "",
+    branch: runtimeContext.branch ?? docContext.branch ?? null,
+    shell: null,
     connection: runtimeContext.connection ?? "local",
   };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
-
-  const handleShellChange = (shell: ResolvedShell) => {
-    setSelectedShell(shell);
-    updateDocument((draft) => { draft.shell = shell.id; });
-  };
 
   /** Persist updated documents list immediately. */
   const persistDocuments = useCallback(
@@ -159,29 +147,48 @@ export default function App() {
     [persistDocuments],
   );
 
-  /** Submit from a real document's ghost block. */
+  /** Delete a document group and all its blocks. */
+  const handleDeleteDocument = useCallback(
+    (docId: string) => {
+      deleteBlocksByDocumentId(docId);
+      setDocuments((prev) => {
+        const updated = prev.filter((d) => d.id !== docId);
+        // Always keep at least one document
+        const final = updated.length > 0
+          ? updated
+          : [{ id: generateId(), name: DEFAULT_DOC_NAME }];
+        persistDocuments(final);
+        return final;
+      });
+      fluxTermService.markDirty();
+    },
+    [deleteBlocksByDocumentId, persistDocuments],
+  );
+
+  /**
+   * Submit from a real document's ghost block.
+   * `shell` comes from the Block component's local shell state.
+   */
   const handleGhostSubmit = useCallback(
-    (docId: string, cmd: string) => {
-      const shell = displayContext.shell;
+    (docId: string, cmd: string, shell: ResolvedShell | null) => {
       if (!shell || !cmd.trim()) return;
       const blockId = createBlock(
         cmd,
         shell,
-        displayContext.cwd,
-        displayContext.branch ?? null,
+        baseContext.cwd,
+        baseContext.branch ?? null,
         docId,
       );
-      fluxTermService.execute(blockId, cmd, shell, displayContext.cwd);
+      fluxTermService.execute(blockId, cmd, shell, baseContext.cwd);
       setGhostCommands((prev) => ({ ...prev, [docId]: "" }));
       fluxTermService.markDirty();
     },
-    [displayContext, createBlock],
+    [baseContext, createBlock],
   );
 
   /** Submit from the ghost BlockDocument — creates a new real document. */
   const handleGhostDocSubmit = useCallback(
-    (cmd: string) => {
-      const shell = displayContext.shell;
+    (cmd: string, shell: ResolvedShell | null) => {
       if (!shell || !cmd.trim()) return;
       const newDocId = generateId();
       const newDoc: BlockDocumentMeta = { id: newDocId, name: DEFAULT_DOC_NAME };
@@ -193,60 +200,67 @@ export default function App() {
       const blockId = createBlock(
         cmd,
         shell,
-        displayContext.cwd,
-        displayContext.branch ?? null,
+        baseContext.cwd,
+        baseContext.branch ?? null,
         newDocId,
       );
-      fluxTermService.execute(blockId, cmd, shell, displayContext.cwd);
+      fluxTermService.execute(blockId, cmd, shell, baseContext.cwd);
       setGhostDocCommand("");
       fluxTermService.markDirty();
     },
-    [displayContext, createBlock, persistDocuments],
+    [baseContext, createBlock, persistDocuments],
   );
 
-  /** Submit from any non-running store block. Idle: promote in-place. Done/error/killed: clone with the (edited) command. */
+  /**
+   * Submit from any non-running store block.
+   * `shell` is the block's local shell (may have been changed by the user).
+   * Idle: promote in-place. Done/error/killed: clone a fresh block.
+   */
   const handleBlockSubmit = useCallback(
-    (blockId: string, cmd: string) => {
-      const shell = displayContext.shell;
+    (blockId: string, cmd: string, shell: ResolvedShell | null) => {
       if (!shell || !cmd.trim()) return;
       const orig = blocks.find((b) => b.id === blockId);
       if (!orig) return;
 
       if (orig.status === "idle") {
-        promoteIdleBlock(blockId, cmd, shell, displayContext.cwd, displayContext.branch ?? null);
-        fluxTermService.execute(blockId, cmd, shell, displayContext.cwd);
+        promoteIdleBlock(blockId, cmd, shell, orig.cwd, orig.branch ?? null);
+        fluxTermService.execute(blockId, cmd, shell, orig.cwd);
       } else {
-        // done / error / killed — create a fresh block (keeps original in history)
+        // done / error / killed — create a fresh block in the same document
         const newId = createBlock(
           cmd,
           shell,
-          displayContext.cwd,
-          displayContext.branch ?? null,
+          // Use the block's final cwd if available, otherwise its initial cwd
+          orig.finalCwd ?? orig.cwd,
+          orig.finalBranch ?? orig.branch,
           orig.documentId ?? documents[0]?.id,
         );
-        fluxTermService.execute(newId, cmd, shell, displayContext.cwd);
+        fluxTermService.execute(newId, cmd, shell, orig.finalCwd ?? orig.cwd);
       }
       fluxTermService.markDirty();
     },
-    [displayContext, blocks, promoteIdleBlock, createBlock, documents],
+    [blocks, promoteIdleBlock, createBlock, documents],
   );
 
-
-  /** Insert a new idle block immediately after `afterBlockId` in the same doc. */
+  /**
+   * Insert a new idle block immediately after `afterBlockId`.
+   * Inherits shell and cwd from the source block — not from a global context.
+   */
   const handleAddAfter = useCallback(
     (afterBlockId: string, docId: string) => {
-      const shell = displayContext.shell;
-      if (!shell) return;
+      const orig = blocks.find((b) => b.id === afterBlockId);
+      if (!orig) return;
+      // Inherit the source block's shell and its post-execution cwd/branch
       spliceBlockAfter(
         afterBlockId,
-        shell,
-        displayContext.cwd,
-        displayContext.branch ?? null,
+        orig.shell,
+        orig.finalCwd ?? orig.cwd,
+        orig.finalBranch ?? orig.branch,
         docId,
       );
       fluxTermService.markDirty();
     },
-    [displayContext, spliceBlockAfter],
+    [blocks, spliceBlockAfter],
   );
 
   /** Re-run a completed block (clone with fresh state in same doc). */
@@ -267,7 +281,8 @@ export default function App() {
     const handleTestMessage = (e: MessageEvent<any>) => {
       const msg = e.data;
       if (msg.type === "testRunCommand" && msg.command) {
-        handleGhostDocSubmit(msg.command);
+        // Use first available shell for test commands
+        handleGhostDocSubmit(msg.command, shells[0] ?? null);
       } else if (msg.type === "testInputText" && msg.text) {
         const runningBlock = Array.isArray(blocks)
           ? blocks.find((b) => b.status === "running")
@@ -277,7 +292,7 @@ export default function App() {
     };
     window.addEventListener("message", handleTestMessage);
     return () => window.removeEventListener("message", handleTestMessage);
-  }, [handleGhostDocSubmit, blocks]);
+  }, [handleGhostDocSubmit, blocks, shells]);
 
   const safeBlocks = Array.isArray(blocks) ? blocks : [];
   const sortedBlocks = [...safeBlocks].sort((a, b) => a.seq - b.seq);
@@ -313,18 +328,17 @@ export default function App() {
                 .filter((b) => b.status === "done" || b.status === "error")
                 .forEach((b) => handleReRun(b.id));
             }}
+            onDelete={() => handleDeleteDocument(doc.id)}
           >
-
-
-            {/* Real blocks */}
+            {/* Real blocks — each gets its own per-block context (shell from frozen block.shell) */}
             {docBlocks.map((block) => (
               <Block
                 key={block.id}
                 block={block}
-                context={displayContext}
+                context={{ ...baseContext, shell: block.shell }}
                 availableShells={shells}
-                onShellChange={handleShellChange}
-                onSubmit={(cmd) => handleBlockSubmit(block.id, cmd)}
+                onShellChange={() => {/* handled locally in Block via localShell */}}
+                onSubmit={(cmd, shell) => handleBlockSubmit(block.id, cmd, shell)}
                 onDelete={() => {
                   deleteBlock(block.id);
                   fluxTermService.markDirty();
@@ -344,17 +358,13 @@ export default function App() {
               onGhostCommandChange={(v) =>
                 setGhostCommands((prev) => ({ ...prev, [doc.id]: v }))
               }
-              onSubmit={(cmd) => handleGhostSubmit(doc.id, cmd)}
-              context={displayContext}
+              onSubmit={(cmd, shell) => handleGhostSubmit(doc.id, cmd, shell)}
+              context={baseContext}
               availableShells={shells}
-              onShellChange={handleShellChange}
+              onShellChange={() => {/* handled locally in Block via localShell */}}
               onAddAfter={() => {
-                const shell = displayContext.shell;
-                if (!shell) return;
                 const last = docBlocks[docBlocks.length - 1];
-                if (last) {
-                  handleAddAfter(last.id, doc.id);
-                }
+                if (last) handleAddAfter(last.id, doc.id);
               }}
             />
           </BlockDocument>
@@ -375,10 +385,10 @@ export default function App() {
           isGhost
           ghostCommand={ghostDocCommand}
           onGhostCommandChange={setGhostDocCommand}
-          onSubmit={handleGhostDocSubmit}
-          context={displayContext}
+          onSubmit={(cmd, shell) => handleGhostDocSubmit(cmd, shell)}
+          context={baseContext}
           availableShells={shells}
-          onShellChange={handleShellChange}
+          onShellChange={() => {/* handled locally in Block via localShell */}}
           onAddAfter={() => {}}
         />
       </BlockDocument>

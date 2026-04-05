@@ -48,6 +48,8 @@ export interface UseNotebookReturn {
     status: "done" | "error" | "killed",
   ) => void;
   deleteBlock: (blockId: string) => void;
+  /** Remove all blocks belonging to a given document group. */
+  deleteBlocksByDocumentId: (documentId: string) => void;
   reRunBlock: (blockId: string) => string | null;
   setRuntimeContext: (ctx: FluxTermContext) => void;
   resetNotebook: (blocks: FluxTermBlock[], runtimeContext: FluxTermContext) => void;
@@ -260,6 +262,17 @@ export function useNotebook(
     );
   }, []);
 
+  /** Remove all blocks whose documentId matches the given value (for deleting a whole document group). */
+  const deleteBlocksByDocumentId = useCallback((documentId: string) => {
+    setState((prev) =>
+      produce(prev, (draft) => {
+        draft.blocks = draft.blocks.filter(
+          (b) => (b.documentId ?? "default") !== documentId,
+        );
+      }),
+    );
+  }, []);
+
   /**
    * Clone a completed block into a new "running" block using the original
    * block's frozen shell, cwd, and branch.
@@ -355,6 +368,7 @@ export function useNotebook(
     setBlockStatus,
     completeBlock,
     deleteBlock,
+    deleteBlocksByDocumentId,
     reRunBlock,
     setRuntimeContext,
     resetNotebook,

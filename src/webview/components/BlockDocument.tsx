@@ -11,6 +11,8 @@ interface BlockDocumentProps {
   isAnyRunning?: boolean;
   /** Triggered by the "Run All" button. */
   onRunAll?: () => void;
+  /** Triggered by the delete document button. Not shown on ghost documents. */
+  onDelete?: () => void;
   /**
    * When true, renders as a ghost/placeholder document.
    * The card is dimmed, the name is not editable, and the Run All button
@@ -34,6 +36,7 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
   onGroupNameChange,
   isAnyRunning = false,
   onRunAll,
+  onDelete,
   isGhost = false,
   children,
 }) => {
@@ -141,50 +144,84 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
           )}
         </div>
 
-        {/* Right: Run All button — hidden on ghost documents */}
+        {/* Right: action buttons — hidden on ghost documents */}
         {!isGhost && (
-          <button
-            onClick={onRunAll}
-            disabled={isAnyRunning}
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              backgroundColor: isAnyRunning
-                ? "var(--vscode-button-secondaryBackground)"
-                : "var(--vscode-button-background)",
-              color: isAnyRunning
-                ? "var(--vscode-button-secondaryForeground)"
-                : "var(--vscode-button-foreground)",
-              border: "none",
-              padding: "0 12px",
-              gap: "6px",
-              height: "24px",
-              borderRadius: "2px",
-              cursor: isAnyRunning ? "not-allowed" : "pointer",
-              fontWeight: "bold",
-              fontSize: "11px",
-              fontFamily: "var(--vscode-font-family)",
-              opacity: isAnyRunning ? 0.6 : 1,
-              transition: "opacity 150ms",
-            }}
-            onMouseEnter={(e) => {
-              if (!isAnyRunning)
-                e.currentTarget.style.backgroundColor =
-                  "var(--vscode-button-hoverBackground)";
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = isAnyRunning
-                ? "var(--vscode-button-secondaryBackground)"
-                : "var(--vscode-button-background)";
-            }}
-          >
-            <span
-              className="codicon codicon-run-all"
-              style={{ fontSize: "14px" }}
-            />
-            Run All
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Delete document */}
+            <button
+              onClick={onDelete}
+              disabled={isAnyRunning}
+              title={isAnyRunning ? "Stop all running blocks first" : "Delete document"}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: "transparent",
+                color: isAnyRunning
+                  ? "var(--vscode-disabledForeground)"
+                  : "var(--vscode-errorForeground, #f14c4c)",
+                border: "none",
+                padding: "0 6px",
+                height: "24px",
+                borderRadius: "2px",
+                cursor: isAnyRunning ? "not-allowed" : "pointer",
+                opacity: isAnyRunning ? 0.5 : 0.7,
+                transition: "opacity 150ms",
+              }}
+              onMouseEnter={(e) => {
+                if (!isAnyRunning) e.currentTarget.style.opacity = "1";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.opacity = isAnyRunning ? "0.5" : "0.7";
+              }}
+            >
+              <span className="codicon codicon-trash" style={{ fontSize: "14px" }} />
+            </button>
+
+            {/* Run All */}
+            <button
+              onClick={onRunAll}
+              disabled={isAnyRunning}
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                backgroundColor: isAnyRunning
+                  ? "var(--vscode-button-secondaryBackground)"
+                  : "var(--vscode-button-background)",
+                color: isAnyRunning
+                  ? "var(--vscode-button-secondaryForeground)"
+                  : "var(--vscode-button-foreground)",
+                border: "none",
+                padding: "0 12px",
+                gap: "6px",
+                height: "24px",
+                borderRadius: "2px",
+                cursor: isAnyRunning ? "not-allowed" : "pointer",
+                fontWeight: "bold",
+                fontSize: "11px",
+                fontFamily: "var(--vscode-font-family)",
+                opacity: isAnyRunning ? 0.6 : 1,
+                transition: "opacity 150ms",
+              }}
+              onMouseEnter={(e) => {
+                if (!isAnyRunning)
+                  e.currentTarget.style.backgroundColor =
+                    "var(--vscode-button-hoverBackground)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.backgroundColor = isAnyRunning
+                  ? "var(--vscode-button-secondaryBackground)"
+                  : "var(--vscode-button-background)";
+              }}
+            >
+              <span
+                className="codicon codicon-run-all"
+                style={{ fontSize: "14px" }}
+              />
+              Run All
+            </button>
+          </div>
         )}
       </div>
 

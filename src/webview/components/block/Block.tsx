@@ -32,10 +32,9 @@ export interface BlockProps {
   onGhostCommandChange?: (value: string) => void;
   /**
    * Called when the user submits a command.
-   * For ghost blocks: parent calls createBlock and resets ghostCommand.
-   * For idle store blocks: parent calls promoteIdleBlock then fluxTermService.execute.
+   * Passes the current locally-selected shell so each block is independent.
    */
-  onSubmit: (cmd: string) => void;
+  onSubmit: (cmd: string, shell: ResolvedShell | null) => void;
 
   // Context bar
   context: FluxTermContext;
@@ -91,6 +90,21 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
     const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
     const [showContextMenu, setShowContextMenu] = useState(false);
 
+    // Each block independently tracks its own shell.
+    // Ghost/idle blocks: defaults to context.shell (from parent ghost state) or first available.
+    // Real completed blocks: initialized from the block's frozen shell.
+    const [localShell, setLocalShell] = useState<ResolvedShell | null>(
+      block?.shell ?? context.shell ?? availableShells[0] ?? null,
+    );
+
+    // Keep localShell in sync when availableShells load for the first time
+    // (e.g. extension sends shellList after mount).
+    useEffect(() => {
+      if (!localShell && availableShells.length > 0) {
+        setLocalShell(block?.shell ?? availableShells[0]);
+      }
+    }, [availableShells]);
+
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const shellButtonRef = useRef<HTMLButtonElement>(null);
     const shellMenuRef = useRef<HTMLDivElement>(null);
@@ -123,10 +137,8 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
 
     const handleSubmit = useCallback(() => {
       if (!commandValue.trim() || isRunning) return;
-      onSubmit(commandValue);
-      // Ghost parent resets ghostCommand; idle local state will be cleared by
-      // promoteIdleBlock making the block non-idle (status → running).
-    }, [commandValue, isRunning, onSubmit]);
+      onSubmit(commandValue, localShell);
+    }, [commandValue, isRunning, onSubmit, localShell]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -434,11 +446,11 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
               disabled={isRunning}
             >
               <span
-                className={`codicon ${context.shell?.icon ?? "codicon-terminal"}`}
+                className={`codicon ${localShell?.icon ?? "codicon-terminal"}`}
                 style={{ fontSize: "14px" }}
               />
               <span style={{ fontSize: "11px", fontWeight: "bold" }}>
-                {availableShells.length === 0 ? "…" : (context.shell?.label ?? "shell")}
+                {availableShells.length === 0 ? "…" : (localShell?.label ?? "shell")}
               </span>
               {!isRunning && (
                 <span
@@ -649,11 +661,12 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
               }}
             >
               {availableShells.map((shell) => {
-                const isSelected = context.shell?.id === shell.id;
+                const isSelected = localShell?.id === shell.id;
                 return (
                   <button
                     key={shell.id}
                     onClick={() => {
+                      setLocalShell(shell);
                       onShellChange(shell);
                       setShowShellMenu(false);
                     }}
