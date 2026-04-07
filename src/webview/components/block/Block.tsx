@@ -16,6 +16,7 @@ import { OutputArea } from "./OutputArea";
 import { BlockInput } from "./BlockInput";
 import { ContextMenu } from "./ContextMenu";
 import { SearchBar } from "./SearchBar";
+import { Tooltip } from "../common";
 
 export interface BlockProps {
   /**
@@ -268,65 +269,72 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
           }}
         >
           {/* Add */}
-          <button
-            className="block-tb-btn"
-            title="Add block below"
-            onClick={onAddAfter}
-          >
-            <span className="codicon codicon-add" style={{ fontSize: "14px" }} />
-          </button>
+          <Tooltip content="Add block below">
+            <button
+              className="block-tb-btn"
+              onClick={onAddAfter}
+            >
+              <span className="codicon codicon-add" style={{ fontSize: "14px" }} />
+            </button>
+          </Tooltip>
 
           {/* Stop / Refresh */}
           {isRunning ? (
-            <button
-              className="block-tb-btn"
-              title="Kill process"
-              onClick={onKill ?? handleKillInternal}
-            >
-              <span
-                className="codicon codicon-debug-stop"
-                style={{
-                  fontSize: "14px",
-                  color: "var(--vscode-testing-iconFailed, #f14c4c)",
-                }}
-              />
-            </button>
+            <Tooltip content="Kill process">
+              <button
+                className="block-tb-btn"
+                onClick={onKill ?? handleKillInternal}
+              >
+                <span
+                  className="codicon codicon-debug-stop"
+                  style={{
+                    fontSize: "14px",
+                    color: "var(--vscode-testing-iconFailed, #f14c4c)",
+                  }}
+                />
+              </button>
+            </Tooltip>
           ) : !isGhost && (isDone || isError || isKilled) ? (
-            <button className="block-tb-btn" title="Re-run" onClick={onReRun}>
-              <span
-                className="codicon codicon-refresh"
-                style={{ fontSize: "14px" }}
-              />
-            </button>
+            <Tooltip content="Re-run">
+              <button className="block-tb-btn" onClick={onReRun}>
+                <span
+                  className="codicon codicon-refresh"
+                  style={{ fontSize: "14px" }}
+                />
+              </button>
+            </Tooltip>
           ) : null}
 
           {/* Search — only when there is output */}
           {hasOutput && (
-            <button
-              className="block-tb-btn"
-              title="Search output"
-              style={{
-                backgroundColor: showSearch
-                  ? "var(--vscode-toolbar-activeBackground)"
-                  : undefined,
-              }}
-              onClick={() => setShowSearch((s) => !s)}
-            >
-              <span
-                className="codicon codicon-search"
-                style={{ fontSize: "14px" }}
-              />
-            </button>
+            <Tooltip content="Search output">
+              <button
+                className="block-tb-btn"
+                style={{
+                  backgroundColor: showSearch
+                    ? "var(--vscode-toolbar-activeBackground)"
+                    : undefined,
+                }}
+                onClick={() => setShowSearch((s) => !s)}
+              >
+                <span
+                  className="codicon codicon-search"
+                  style={{ fontSize: "14px" }}
+                />
+              </button>
+            </Tooltip>
           )}
 
           {/* Delete */}
           {!isGhost && !isRunning && (
-            <button className="block-tb-btn" title="Delete block" onClick={onDelete}>
-              <span
-                className="codicon codicon-trash"
-                style={{ fontSize: "14px" }}
-              />
-            </button>
+            <Tooltip content="Delete block">
+              <button className="block-tb-btn" onClick={onDelete}>
+                <span
+                  className="codicon codicon-trash"
+                  style={{ fontSize: "14px" }}
+                />
+              </button>
+            </Tooltip>
           )}
 
           <div
@@ -339,16 +347,17 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
           />
 
           {/* Drag grip (decorative) */}
-          <button
-            className="block-tb-btn"
-            title="Reorder (coming soon)"
-            style={{ cursor: "grab" }}
-          >
-            <span
-              className="codicon codicon-gripper"
-              style={{ fontSize: "14px" }}
-            />
-          </button>
+          <Tooltip content="Reorder (coming soon)">
+            <button
+              className="block-tb-btn"
+              style={{ cursor: "grab" }}
+            >
+              <span
+                className="codicon codicon-gripper"
+                style={{ fontSize: "14px" }}
+              />
+            </button>
+          </Tooltip>
 
           <div
             style={{
@@ -361,21 +370,22 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
 
           {/* More */}
           <div style={{ position: "relative" }}>
-            <button
-              className="block-tb-btn"
-              title="More actions"
-              style={{
-                backgroundColor: showContextMenu
-                  ? "var(--vscode-toolbar-activeBackground)"
-                  : undefined,
-              }}
-              onClick={() => setShowContextMenu((m) => !m)}
-            >
-              <span
-                className="codicon codicon-ellipsis"
-                style={{ fontSize: "14px" }}
-              />
-            </button>
+            <Tooltip content="More actions">
+              <button
+                className="block-tb-btn"
+                style={{
+                  backgroundColor: showContextMenu
+                    ? "var(--vscode-toolbar-activeBackground)"
+                    : undefined,
+                }}
+                onClick={() => setShowContextMenu((m) => !m)}
+              >
+                <span
+                  className="codicon codicon-ellipsis"
+                  style={{ fontSize: "14px" }}
+                />
+              </button>
+            </Tooltip>
             {showContextMenu && block && (
               <ContextMenu
                 block={block}

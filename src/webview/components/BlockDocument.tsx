@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from "react";
+import { Tooltip } from "./common";
 
 interface BlockDocumentProps {
   /**
@@ -128,26 +129,29 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
               }}
             />
           ) : (
-            <span
-              style={{
-                color: "var(--vscode-foreground)",
-                fontSize: "12px",
-                fontWeight: 500,
-                cursor: isGhost ? "default" : "text",
-                fontStyle: isGhost ? "italic" : undefined,
-                opacity: isGhost ? 0.7 : 1,
-              }}
-              title={
+            <Tooltip
+              content={
                 isGhost
                   ? "Type a command to start a new document"
                   : "Double-click to rename"
               }
-              onDoubleClick={() => {
-                if (!isGhost) setIsEditing(true);
-              }}
             >
-              {groupName}
-            </span>
+              <span
+                style={{
+                  color: "var(--vscode-foreground)",
+                  fontSize: "12px",
+                  fontWeight: 500,
+                  cursor: isGhost ? "default" : "text",
+                  fontStyle: isGhost ? "italic" : undefined,
+                  opacity: isGhost ? 0.7 : 1,
+                }}
+                onDoubleClick={() => {
+                  if (!isGhost) setIsEditing(true);
+                }}
+              >
+                {groupName}
+              </span>
+            </Tooltip>
           )}
         </div>
 
@@ -155,42 +159,45 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
         {!isGhost && (
           <div className="flex items-center gap-2">
             {/* Delete document */}
-            <button
-              onClick={onDelete}
-              disabled={isAnyRunning}
-              title={
+            <Tooltip
+              content={
                 isAnyRunning
                   ? "Stop all running blocks first"
                   : "Delete document"
               }
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                backgroundColor: "transparent",
-                color: isAnyRunning
-                  ? "var(--vscode-disabledForeground)"
-                  : "var(--vscode-errorForeground, #f14c4c)",
-                border: "none",
-                padding: "0 6px",
-                height: "24px",
-                borderRadius: "2px",
-                cursor: isAnyRunning ? "not-allowed" : "pointer",
-                opacity: isAnyRunning ? 0.5 : 0.7,
-                transition: "opacity 150ms",
-              }}
-              onMouseEnter={(e) => {
-                if (!isAnyRunning) e.currentTarget.style.opacity = "1";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.opacity = isAnyRunning ? "0.5" : "0.7";
-              }}
             >
-              <span
-                className="codicon codicon-trash"
-                style={{ fontSize: "14px" }}
-              />
-            </button>
+              <button
+                onClick={onDelete}
+                disabled={isAnyRunning}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  backgroundColor: "transparent",
+                  color: isAnyRunning
+                    ? "var(--vscode-disabledForeground)"
+                    : "var(--vscode-errorForeground, #f14c4c)",
+                  border: "none",
+                  padding: "0 6px",
+                  height: "24px",
+                  borderRadius: "2px",
+                  cursor: isAnyRunning ? "not-allowed" : "pointer",
+                  opacity: isAnyRunning ? 0.5 : 0.7,
+                  transition: "opacity 150ms",
+                }}
+                onMouseEnter={(e) => {
+                  if (!isAnyRunning) e.currentTarget.style.opacity = "1";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.opacity = isAnyRunning ? "0.5" : "0.7";
+                }}
+              >
+                <span
+                  className="codicon codicon-trash"
+                  style={{ fontSize: "14px" }}
+                />
+              </button>
+            </Tooltip>
 
             {/* Run All */}
             <button
