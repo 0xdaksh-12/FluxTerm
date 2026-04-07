@@ -77,11 +77,10 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
         borderRadius: "4px",
         overflow: "hidden",
         width: "100%",
-        opacity: isGhost ? 0.5 : 1,
         transition: "opacity 150ms",
       }}
     >
-      {/* Document header bar */}
+      {/* Document header bar — dimmed on ghost docs; opacity here does NOT affect the blocks below */}
       <div
         style={{
           display: "flex",
@@ -93,6 +92,8 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
           borderBottom: "1px solid var(--vscode-panel-border)",
           fontFamily: "var(--vscode-editor-font-family, monospace)",
           userSelect: "none",
+          opacity: isGhost ? 0.5 : 1,
+          transition: "opacity 150ms",
         }}
       >
         {/* Left: folder icon + document name */}
@@ -136,8 +137,14 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
                 fontStyle: isGhost ? "italic" : undefined,
                 opacity: isGhost ? 0.7 : 1,
               }}
-              title={isGhost ? "Type a command to start a new document" : "Double-click to rename"}
-              onDoubleClick={() => { if (!isGhost) setIsEditing(true); }}
+              title={
+                isGhost
+                  ? "Type a command to start a new document"
+                  : "Double-click to rename"
+              }
+              onDoubleClick={() => {
+                if (!isGhost) setIsEditing(true);
+              }}
             >
               {groupName}
             </span>
@@ -151,7 +158,11 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
             <button
               onClick={onDelete}
               disabled={isAnyRunning}
-              title={isAnyRunning ? "Stop all running blocks first" : "Delete document"}
+              title={
+                isAnyRunning
+                  ? "Stop all running blocks first"
+                  : "Delete document"
+              }
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -175,7 +186,10 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
                 e.currentTarget.style.opacity = isAnyRunning ? "0.5" : "0.7";
               }}
             >
-              <span className="codicon codicon-trash" style={{ fontSize: "14px" }} />
+              <span
+                className="codicon codicon-trash"
+                style={{ fontSize: "14px" }}
+              />
             </button>
 
             {/* Run All */}
@@ -226,10 +240,7 @@ export const BlockDocument: React.FC<BlockDocumentProps> = ({
       </div>
 
       {/* Block list */}
-      <div
-        className="flex flex-col"
-        style={{ gap: "1rem", padding: "1rem" }}
-      >
+      <div className="flex flex-col" style={{ gap: "1rem", padding: "1rem" }}>
         {children}
       </div>
     </div>

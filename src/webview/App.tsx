@@ -54,7 +54,7 @@ export default function App() {
     promoteIdleBlock,
   } = useNotebook(docContext, []);
 
-  // ── Document Groups ──────────────────────────────────────────────────────
+  //  Document Groups
   // Empty on new files — the ghost BlockDocument is the sole entry surface.
   const [documents, setDocuments] = useState<BlockDocumentMeta[]>([]);
 
@@ -62,7 +62,9 @@ export default function App() {
   const [ghostDocCommand, setGhostDocCommand] = useState("");
 
   // Per-document ghost block commands
-  const [ghostCommands, setGhostCommands] = useState<Record<string, string>>({});
+  const [ghostCommands, setGhostCommands] = useState<Record<string, string>>(
+    {},
+  );
 
   // Sync runtime context from extension init
   useEffect(() => {
@@ -71,7 +73,11 @@ export default function App() {
 
   // Restore saved blocks + documents from previously saved .ftx session
   useEffect(() => {
-    if (document.blocks && document.blocks.length > 0 && document.runtimeContext) {
+    if (
+      document.blocks &&
+      document.blocks.length > 0 &&
+      document.runtimeContext
+    ) {
       resetNotebook(document.blocks, document.runtimeContext);
     } else if (docContext.cwd) {
       setRuntimeContext(docContext);
@@ -96,7 +102,6 @@ export default function App() {
     }
     // New file: documents stays [], ghost BlockDocument is shown
   }, [docContext.cwd]);
-
 
   // Wire execution events from extension to notebookStore
   useBlockExecution({ appendOutput, completeBlock, setBlockStatus });
@@ -141,12 +146,12 @@ export default function App() {
     connection: runtimeContext.connection ?? "local",
   };
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
-
   /** Persist updated documents list immediately. */
   const persistDocuments = useCallback(
     (updated: BlockDocumentMeta[]) => {
-      updateDocument((draft) => { draft.documents = updated; });
+      updateDocument((draft) => {
+        draft.documents = updated;
+      });
     },
     [updateDocument],
   );
@@ -169,12 +174,9 @@ export default function App() {
       deleteBlocksByDocumentId(docId);
       setDocuments((prev) => {
         const updated = prev.filter((d) => d.id !== docId);
-        // Always keep at least one document
-        const final = updated.length > 0
-          ? updated
-          : [{ id: generateId(), name: DEFAULT_DOC_NAME }];
-        persistDocuments(final);
-        return final;
+        // Allow empty — the ghost BlockDocument at the bottom is the re-entry surface
+        persistDocuments(updated);
+        return updated;
       });
       fluxTermService.markDirty();
     },
@@ -207,7 +209,10 @@ export default function App() {
     (cmd: string, shell: ResolvedShell | null) => {
       if (!shell || !cmd.trim()) return;
       const newDocId = generateId();
-      const newDoc: BlockDocumentMeta = { id: newDocId, name: DEFAULT_DOC_NAME };
+      const newDoc: BlockDocumentMeta = {
+        id: newDocId,
+        name: DEFAULT_DOC_NAME,
+      };
       setDocuments((prev) => {
         const updated = [...prev, newDoc];
         persistDocuments(updated);
@@ -353,8 +358,12 @@ export default function App() {
                 block={block}
                 context={{ ...baseContext, shell: block.shell }}
                 availableShells={shells}
-                onShellChange={() => {/* handled locally in Block via localShell */}}
-                onSubmit={(cmd, shell) => handleBlockSubmit(block.id, cmd, shell)}
+                onShellChange={() => {
+                  /* handled locally in Block via localShell */
+                }}
+                onSubmit={(cmd, shell) =>
+                  handleBlockSubmit(block.id, cmd, shell)
+                }
                 onDelete={() => {
                   deleteBlock(block.id);
                   fluxTermService.markDirty();
@@ -377,7 +386,9 @@ export default function App() {
               onSubmit={(cmd, shell) => handleGhostSubmit(doc.id, cmd, shell)}
               context={baseContext}
               availableShells={shells}
-              onShellChange={() => {/* handled locally in Block via localShell */}}
+              onShellChange={() => {
+                /* handled locally in Block via localShell */
+              }}
               onAddAfter={() => {
                 const last = docBlocks[docBlocks.length - 1];
                 if (last) handleAddAfter(last.id, doc.id);
@@ -404,7 +415,9 @@ export default function App() {
           onSubmit={(cmd, shell) => handleGhostDocSubmit(cmd, shell)}
           context={baseContext}
           availableShells={shells}
-          onShellChange={() => {/* handled locally in Block via localShell */}}
+          onShellChange={() => {
+            /* handled locally in Block via localShell */
+          }}
           onAddAfter={() => {}}
         />
       </BlockDocument>
