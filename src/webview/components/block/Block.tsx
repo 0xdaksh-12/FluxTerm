@@ -90,7 +90,7 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
     // Editable in every state except while the command is actively running.
     const isEditable = isGhost || !isRunning;
 
-    // Local command — pre-filled from the frozen block command so the user can
+    // Local command — pre-filled from the block's last command so the user can
     // edit and re-submit after the block completes.
     const [localCommand, setLocalCommand] = useState(block?.command ?? "");
 
@@ -107,20 +107,20 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
     const [showContextMenu, setShowContextMenu] = useState(false);
 
     // Each block independently tracks its own shell.
-    // Ghost/idle blocks: defaults to context.shell (from parent ghost state) or first available.
-    // Real completed blocks: initialized from the block's frozen shell.
+    // Ghost/idle blocks: defaults to context.shell or first available.
+    // Real completed blocks: initialized from the block's shell.
     const [localShell, setLocalShell] = useState<ResolvedShell | null>(
       block?.shell ?? context.shell ?? availableShells[0] ?? null,
     );
 
-    // Local CWD override — starts from the block's frozen cwd (or context cwd for ghost).
+    // Local CWD override — starts from the block's cwd (or context cwd for ghost).
     // For idle/ghost blocks this is passed back via onSubmit so the execution uses it.
     // For completed blocks it's used on re-run.
     const [localCwd, setLocalCwd] = useState<string>(
       block?.cwd ?? context.cwd ?? "",
     );
 
-    // Keep localCwd in sync if the block's frozen cwd updates externally,
+    // Keep localCwd in sync if the block's cwd updates externally,
     // but only when the user hasn't manually edited it yet.
     // `cwdCommitted` becomes true once the user commits a new path via CwdEditor.
     const cwdCommitted = useRef(false);

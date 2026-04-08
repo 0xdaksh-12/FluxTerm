@@ -281,7 +281,7 @@ export default function App() {
       } else {
         // done / error / killed — re-run the same block in-place.
         // BUG 1 FIX: use `cmd` (the user's current textarea text), not
-        // `orig.command` (the command frozen in the store from the last run).
+        // `orig.command` (the command stored in the last run).
         const sameId = reRunBlockInPlace(blockId);
         if (!sameId) return;
         const effectiveCwd = cwdOverride ?? orig.finalCwd ?? orig.cwd;
@@ -403,7 +403,7 @@ export default function App() {
             }}
             onDelete={() => handleDeleteDocument(doc.id)}
           >
-            {/* Real blocks — each gets its own per-block context (shell from frozen block.shell) */}
+            {/* Real blocks — each gets its own per-block context (shell from block.shell) */}
             {docBlocks.map((block) => (
               <Block
                 key={block.id}

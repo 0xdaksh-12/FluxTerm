@@ -171,16 +171,18 @@ export class FluxTermDocumentSession {
           // Directory listing for CWD autocomplete
           case "listDir": {
             const { requestId, path: dirPath } = message;
-            try {
-              const dirEntries = await fs.readdir(dirPath, { withFileTypes: true });
-              const dirs = dirEntries
-                .filter((e) => e.isDirectory() && !e.name.startsWith("."))
-                .map((e) => e.name)
-                .sort();
-              this.post({ type: "dirList", requestId, entries: dirs });
-            } catch {
-              this.post({ type: "dirList", requestId, entries: [], error: "invalid" });
-            }
+            this.enqueue(async () => {
+              try {
+                const dirEntries = await fs.readdir(dirPath, { withFileTypes: true });
+                const dirs = dirEntries
+                  .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+                  .map((e) => e.name)
+                  .sort();
+                this.post({ type: "dirList", requestId, entries: dirs });
+              } catch {
+                this.post({ type: "dirList", requestId, entries: [], error: "invalid" });
+              }
+            });
             break;
           }
 

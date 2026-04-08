@@ -123,7 +123,7 @@ export function useNotebook(
   /**
    * Overwrite the runtimeContext completely.
    * Called when the extension sends the live context on init.
-   * Does NOT affect any existing block's frozen properties.
+   * Does NOT affect any existing block's properties.
    */
   const setRuntimeContext = useCallback((ctx: FluxTermContext) => {
     setState((prev) =>
@@ -176,9 +176,9 @@ export function useNotebook(
             id,
             seq,
             command,
-            shell, // frozen at creation
-            cwd, // frozen at creation
-            branch, // frozen at creation
+            shell,
+            cwd,
+            branch,
             documentId,
             status: "running",
             output: [separator],
@@ -463,8 +463,8 @@ export function useNotebook(
 
   /**
    * Update the `cwd` on an idle block (e.g. user edits the path before submitting).
-   * No-op if the block is not idle — frozen CWDs on running/done blocks are
-   * intentionally immutable.
+   * No-op if the block is not idle — cwd on running/done blocks reflects the
+   * environment at execution time and is not changed here.
    */
   const updateBlockCwd = useCallback((blockId: string, cwd: string): void => {
     setState((prev) =>

@@ -12,7 +12,8 @@ export type BlockStatus = "idle" | "running" | "done" | "error" | "killed";
 
 /**
  * Represents one executed command block in the notebook.
- * Shell path, cwd, and branch are frozen at creation time and never change.
+ * Shell path, cwd, and branch are set when the block begins executing.
+ * They reflect the environment at the time the command runs.
  * Final values (finalCwd, finalBranch, exitCode) are populated on completion.
  */
 export interface FluxTermBlock {
@@ -29,8 +30,8 @@ export interface FluxTermBlock {
    */
   documentId?: string;
 
-  // Frozen at creation
-  /** Resolved shell used when this block was created (path + args frozen together). */
+  // Set at run time
+  /** Resolved shell used to run this block (path + args). */
   shell: ResolvedShell;
   /** Working directory at the time this block was created. */
   cwd: string;
@@ -73,7 +74,7 @@ export interface FluxTermBlock {
 /**
  * Global runtime context for the notebook session.
  * Only updated by completed (non-killed) blocks.
- * Used to initialize the next block's frozen properties.
+ * Used to set the initial shell, cwd, and branch for the next block.
  */
 export interface FluxTermContext {
   cwd: string;
