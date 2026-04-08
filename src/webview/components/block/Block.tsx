@@ -17,6 +17,7 @@ import { BlockInput } from "./BlockInput";
 import { ContextMenu } from "./ContextMenu";
 import { SearchBar } from "./SearchBar";
 import { Tooltip } from "../common";
+import { CwdEditor } from "./CwdEditor";
 
 export interface BlockProps {
   /**
@@ -34,8 +35,14 @@ export interface BlockProps {
   /**
    * Called when the user submits a command.
    * Passes the current locally-selected shell so each block is independent.
+   * The optional `cwdOverride` is set when the user has edited the CWD before
+   * submitting (ghost blocks, idle blocks, or completed blocks re-run).
    */
-  onSubmit: (cmd: string, shell: ResolvedShell | null) => void;
+  onSubmit: (
+    cmd: string,
+    shell: ResolvedShell | null,
+    cwdOverride?: string,
+  ) => void;
 
   // Context bar
   context: FluxTermContext;
@@ -48,6 +55,11 @@ export interface BlockProps {
   onClearOutput?: () => void;
   onAddAfter?: () => void;
   onKill?: () => void;
+  /**
+   * Called when CwdEditor commits a new path for this block.
+   * For idle blocks this mutates the store; for others it stays local.
+   */
+  onCwdChange?: (cwd: string) => void;
 }
 
 export const Block = forwardRef<HTMLDivElement, BlockProps>(
@@ -66,6 +78,7 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
       onClearOutput,
       onAddAfter,
       onKill,
+      onCwdChange,
     },
     ref,
   ) => {
@@ -99,6 +112,24 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
     const [localShell, setLocalShell] = useState<ResolvedShell | null>(
       block?.shell ?? context.shell ?? availableShells[0] ?? null,
     );
+
+    // Local CWD override — starts from the block's frozen cwd (or context cwd for ghost).
+    // For idle/ghost blocks this is passed back via onSubmit so the execution uses it.
+    // For completed blocks it's used on re-run.
+    const [localCwd, setLocalCwd] = useState<string>(
+      block?.cwd ?? context.cwd ?? "",
+    );
+
+    // Keep localCwd in sync if the block's frozen cwd updates externally,
+    // but only when the user hasn't manually edited it yet.
+    // `cwdCommitted` becomes true once the user commits a new path via CwdEditor.
+    const cwdCommitted = useRef(false);
+    useEffect(() => {
+      if (!cwdCommitted.current) {
+        setLocalCwd(block?.cwd ?? context.cwd ?? "");
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [block?.cwd, context.cwd]);
 
     // Keep localShell in sync when availableShells load for the first time
     // (e.g. extension sends shellList after mount).
@@ -140,8 +171,9 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
 
     const handleSubmit = useCallback(() => {
       if (!commandValue.trim() || isRunning) return;
-      onSubmit(commandValue, localShell);
-    }, [commandValue, isRunning, onSubmit, localShell]);
+      // Pass the localCwd override so App.tsx can use it for the execution.
+      onSubmit(commandValue, localShell, localCwd || undefined);
+    }, [commandValue, isRunning, onSubmit, localShell, localCwd]);
 
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -206,7 +238,7 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
       }
 
       const displayBranch = block?.branch ?? context.branch;
-      const displayCwd = block?.cwd ?? context.cwd;
+      const displayCwd = localCwd || block?.cwd || context.cwd;
 
       return (
         <>
@@ -231,18 +263,17 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
           >
             <span
               className="codicon codicon-folder-opened"
-              style={{ fontSize: "13px" }}
+              style={{ fontSize: "13px", flexShrink: 0 }}
             />
-            <span
-              className="truncate"
-              style={{
-                color: "var(--vscode-foreground)",
-                fontSize: "12px",
-                fontWeight: "600",
+            <CwdEditor
+              cwd={displayCwd}
+              readOnly={isRunning}
+              onCommit={(newCwd) => {
+                cwdCommitted.current = true;
+                setLocalCwd(newCwd);
+                onCwdChange?.(newCwd);
               }}
-            >
-              {displayCwd}
-            </span>
+            />
           </div>
         </>
       );

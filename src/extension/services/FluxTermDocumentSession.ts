@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import * as path from "path";
+import * as fs from "fs/promises";
 import { exec } from "child_process";
 import { promisify } from "util";
 
@@ -166,6 +167,35 @@ export class FluxTermDocumentSession {
           case "log":
             Ext.info(message.message);
             break;
+
+          // Directory listing for CWD autocomplete
+          case "listDir": {
+            const { requestId, path: dirPath } = message;
+            try {
+              const dirEntries = await fs.readdir(dirPath, { withFileTypes: true });
+              const dirs = dirEntries
+                .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+                .map((e) => e.name)
+                .sort();
+              this.post({ type: "dirList", requestId, entries: dirs });
+            } catch {
+              this.post({ type: "dirList", requestId, entries: [], error: "invalid" });
+            }
+            break;
+          }
+
+          // VS Code notification
+          case "notify": {
+            const msg = message.message;
+            if (message.level === "warning") {
+              vscode.window.showWarningMessage(msg);
+            } else if (message.level === "error") {
+              vscode.window.showErrorMessage(msg);
+            } else {
+              vscode.window.showInformationMessage(msg);
+            }
+            break;
+          }
 
           default:
             break;

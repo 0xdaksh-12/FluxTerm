@@ -91,6 +91,12 @@ export interface UseNotebookReturn {
     cwd: string,
     branch: string | null,
   ) => void;
+  /**
+   * Update the frozen `cwd` on an idle block.
+   * Only mutates blocks with status === "idle" — no-op otherwise.
+   * Used by CwdEditor when the user edits the path before submitting.
+   */
+  updateBlockCwd: (blockId: string, cwd: string) => void;
 }
 
 /**
@@ -424,6 +430,22 @@ export function useNotebook(
     [],
   );
 
+  /**
+   * Update the `cwd` on an idle block (e.g. user edits the path before submitting).
+   * No-op if the block is not idle — frozen CWDs on running/done blocks are
+   * intentionally immutable.
+   */
+  const updateBlockCwd = useCallback((blockId: string, cwd: string): void => {
+    setState((prev) =>
+      produce(prev, (draft) => {
+        const block = draft.blocks.find((b) => b.id === blockId);
+        if (block && block.status === "idle") {
+          block.cwd = cwd;
+        }
+      }),
+    );
+  }, []);
+
   return {
     blocks: state.blocks,
     runtimeContext: state.runtimeContext,
@@ -439,5 +461,6 @@ export function useNotebook(
     resetNotebook,
     spliceBlockAfter,
     promoteIdleBlock,
+    updateBlockCwd,
   };
 }

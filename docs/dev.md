@@ -18,7 +18,33 @@ The architecture is split between three main components:
 
 ### Recent Fixes & Updates
 
-- **Webview UI Complete Refactor (`Block.tsx`, `BlockDocument.tsx`, `App.tsx`)**: The entire webview presentation layer has been redesigned. The previous two-zone model — a scrollable output history list (`OutputBlock`) combined with a fixed bottom input bar (`InputSection`) — is replaced by a continuous notebook model where every command block is a self-contained card.
+- **Interactive CWD Path Editor (`CwdEditor.tsx`, `Block.tsx`, `App.tsx`, `FluxTermDocumentSession.ts`, `FluxTermService.ts`, `notebookStore.ts`, `MessageProtocol.ts`)**
+
+  The CWD path displayed in each block's context bar is now fully interactive.
+
+  **What was added:**
+  - New `CwdEditor` component (`src/webview/components/block/CwdEditor.tsx`) — a self-contained display/edit toggle. Display mode shows the path with a dashed underline hover hint. Double-click enters an inline `<input>`. Ctrl/Cmd+click copies to clipboard and flashes "Copied!".
+  - Edit mode autocompletes directories via debounced (200 ms) `listDir` IPC calls. The `AutocompleteDropdown` renders via `createPortal` (absolute positioned, no overflow clipping), supports ↑↓ arrow navigation and Tab to complete.
+  - On Enter, `commitValue` validates by listing the parent directory and checking whether the leaf segment appears in the result — reliably distinguishing an empty-but-valid directory from a non-existent path without adding a dedicated validation endpoint. Invalid paths trigger `fluxTermService.notify("warning", ...)`, which routes to `vscode.window.showWarningMessage`.
+  - Escape or blur discards changes and reverts.
+  - Running blocks (`readOnly=true`) show the path without any interaction.
+
+  **Protocol additions** (`MessageProtocol.ts`):
+  - `listDir { requestId, path }` (webview → extension): request child dir names.
+  - `dirList { requestId, entries[], error? }` (extension → webview): response.
+  - `notify { level, message }` (webview → extension): triggers VS Code notification.
+
+  **Extension handler** (`FluxTermDocumentSession.ts`): `listDir` uses `fs.readdir` (Node `fs/promises`), filters hidden dirs, sorts alphabetically, and responds synchronously (no queue). `notify` switches on `level` to call the appropriate `vscode.window.show*Message`.
+
+  **Service helpers** (`FluxTermService.ts`): `listDir(path)` wraps the request/response in a `Promise` with a 3 s timeout and correlates responses via `requestId`. `notify(level, message)` is a fire-and-forget postMessage.
+
+  **Store mutation** (`notebookStore.ts`): `updateBlockCwd(blockId, cwd)` mutates `block.cwd` only when `block.status === "idle"` — frozen CWDs on running/done blocks remain immutable by design.
+
+  **Block wiring** (`Block.tsx`): `localCwd` (`useState`) tracks the user's override, guarded by `cwdCommitted` (`useRef`) so external context updates don't overwrite a committed edit. `handleSubmit` passes `localCwd` as the optional `cwdOverride` argument to `onSubmit`. The raw `<span>{displayCwd}</span>` is replaced with `<CwdEditor cwd={displayCwd} readOnly={isRunning} onCommit={...}>`.
+
+  **App wiring** (`App.tsx`): All `onSubmit` handlers now accept the optional `cwdOverride` parameter. The effective CWD for execution is `cwdOverride ?? orig.finalCwd ?? orig.cwd`. Ghost blocks use new `ghostCwds` (per-document) and `ghostDocCwd` state. Real idle blocks call `updateBlockCwd` on `onCwdChange`.
+
+ The previous two-zone model — a scrollable output history list (`OutputBlock`) combined with a fixed bottom input bar (`InputSection`) — is replaced by a continuous notebook model where every command block is a self-contained card.
 
 - **Re-run In-Place and Clear Output**:
   - Re-running an existing block now executes **in-place** rather than spawning an identical visual clone of the original block. `notebookStore.ts` now uses `reRunBlockInPlace()` to bump the block sequence internally, reset its metadata flags to `"running"`, and cleanly inject a `[Datetime]` separator type entry (`OutputLine`) directly into the `output` array buffer. This cleanly preserves previous log histories in terminal views without duplicating physical elements on the DOM.

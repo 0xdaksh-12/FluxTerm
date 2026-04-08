@@ -159,7 +159,14 @@ export type WebviewMessage =
   /** Send user input to a running block's stdin. */
   | { type: "input"; blockId: string; text: string }
   /** Kill the process associated with a running block. */
-  | { type: "killBlock"; blockId: string };
+  | { type: "killBlock"; blockId: string }
+  /**
+   * Request a directory listing for CWD autocomplete.
+   * The extension responds with a `dirList` message carrying the same requestId.
+   */
+  | { type: "listDir"; requestId: string; path: string }
+  /** Show a VS Code notification (info / warning / error). */
+  | { type: "notify"; level: "info" | "warning" | "error"; message: string };
 
 // Extension → Webview Messages
 export type ExtMessage =
@@ -181,4 +188,10 @@ export type ExtMessage =
       status: "done" | "error" | "killed";
     }
   /** Block process failed to spawn or encountered an unrecoverable error. */
-  | { type: "blockError"; blockId: string; message: string };
+  | { type: "blockError"; blockId: string; message: string }
+  /**
+   * Response to a `listDir` request.
+   * `entries` contains immediate child directory names (not full paths).
+   * `error` is set when the path doesn't exist or isn't a directory.
+   */
+  | { type: "dirList"; requestId: string; entries: string[]; error?: string };

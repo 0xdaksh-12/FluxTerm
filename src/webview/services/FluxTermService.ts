@@ -114,6 +114,40 @@ class FluxTermService {
   public killBlock(blockId: string): void {
     this.vscode.postMessage({ type: "killBlock", blockId });
   }
+
+  /**
+   * Request an immediate listing of child directories at `dirPath`.
+   * Used by CwdEditor for autocomplete suggestions.
+   * Returns a Promise that resolves with the directory names (not full paths).
+   * Times out after 3 s and resolves with [].
+   */
+  public listDir(dirPath: string): Promise<string[]> {
+    const requestId = Math.random().toString(36).slice(2);
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) { settled = true; unsub(); resolve([]); }
+      }, 3000);
+
+      const unsub = this.subscribe((msg: any) => {
+        if (msg.type === "dirList" && msg.requestId === requestId) {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            unsub();
+            resolve(msg.entries ?? []);
+          }
+        }
+      });
+
+      this.vscode.postMessage({ type: "listDir", requestId, path: dirPath });
+    });
+  }
+
+  /** Show a VS Code notification (info / warning / error). */
+  public notify(level: "info" | "warning" | "error", message: string): void {
+    this.vscode.postMessage({ type: "notify", level, message });
+  }
 }
 
 export const fluxTermService = FluxTermService.getInstance();

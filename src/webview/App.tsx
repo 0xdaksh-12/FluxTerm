@@ -53,6 +53,7 @@ export default function App() {
     resetNotebook,
     spliceBlockAfter,
     promoteIdleBlock,
+    updateBlockCwd,
   } = useNotebook(docContext, []);
 
   //  Document Groups
@@ -66,6 +67,12 @@ export default function App() {
   const [ghostCommands, setGhostCommands] = useState<Record<string, string>>(
     {},
   );
+
+  // Per-document ghost block CWD overrides (edited via CwdEditor)
+  const [ghostCwds, setGhostCwds] = useState<Record<string, string>>({});
+
+  // Ghost BlockDocument's ghost block CWD override
+  const [ghostDocCwd, setGhostDocCwd] = useState("");
 
   // Sync runtime context from extension init
   useEffect(() => {
@@ -189,25 +196,33 @@ export default function App() {
    * `shell` comes from the Block component's local shell state.
    */
   const handleGhostSubmit = useCallback(
-    (docId: string, cmd: string, shell: ResolvedShell | null) => {
+    (
+      docId: string,
+      cmd: string,
+      shell: ResolvedShell | null,
+      cwdOverride?: string,
+    ) => {
       if (!shell || !cmd.trim()) return;
+      const effectiveCwd = cwdOverride ?? ghostCwds[docId] ?? baseContext.cwd;
       const blockId = createBlock(
         cmd,
         shell,
-        baseContext.cwd,
+        effectiveCwd,
         baseContext.branch ?? null,
         docId,
       );
-      fluxTermService.execute(blockId, cmd, shell, baseContext.cwd);
+      fluxTermService.execute(blockId, cmd, shell, effectiveCwd);
       setGhostCommands((prev) => ({ ...prev, [docId]: "" }));
+      // Clear the CWD override after submit — next ghost inherits fresh context
+      setGhostCwds((prev) => ({ ...prev, [docId]: "" }));
       fluxTermService.markDirty();
     },
-    [baseContext, createBlock],
+    [baseContext, createBlock, ghostCwds],
   );
 
   /** Submit from the ghost BlockDocument — creates a new real document. */
   const handleGhostDocSubmit = useCallback(
-    (cmd: string, shell: ResolvedShell | null) => {
+    (cmd: string, shell: ResolvedShell | null, cwdOverride?: string) => {
       if (!shell || !cmd.trim()) return;
       const newDocId = generateId();
       const newDoc: BlockDocumentMeta = {
@@ -219,39 +234,55 @@ export default function App() {
         persistDocuments(updated);
         return updated;
       });
+      const effectiveCwd = cwdOverride ?? (ghostDocCwd || baseContext.cwd);
       const blockId = createBlock(
         cmd,
         shell,
-        baseContext.cwd,
+        effectiveCwd,
         baseContext.branch ?? null,
         newDocId,
       );
-      fluxTermService.execute(blockId, cmd, shell, baseContext.cwd);
+      fluxTermService.execute(blockId, cmd, shell, effectiveCwd);
       setGhostDocCommand("");
+      setGhostDocCwd("");
       fluxTermService.markDirty();
     },
-    [baseContext, createBlock, persistDocuments],
+    [baseContext, createBlock, persistDocuments, ghostDocCwd],
   );
 
   /**
    * Submit from any non-running store block.
    * `shell` is the block's local shell (may have been changed by the user).
+   * `cwdOverride` is set when the user edited the CWD via CwdEditor before submitting.
    * Idle: promote in-place. Done/error/killed: clone a fresh block.
    */
   const handleBlockSubmit = useCallback(
-    (blockId: string, cmd: string, shell: ResolvedShell | null) => {
+    (
+      blockId: string,
+      cmd: string,
+      shell: ResolvedShell | null,
+      cwdOverride?: string,
+    ) => {
       if (!shell || !cmd.trim()) return;
       const orig = blocks.find((b) => b.id === blockId);
       if (!orig) return;
 
       if (orig.status === "idle") {
-        promoteIdleBlock(blockId, cmd, shell, orig.cwd, orig.branch ?? null);
-        fluxTermService.execute(blockId, cmd, shell, orig.cwd);
+        const effectiveCwd = cwdOverride ?? orig.cwd;
+        promoteIdleBlock(
+          blockId,
+          cmd,
+          shell,
+          effectiveCwd,
+          orig.branch ?? null,
+        );
+        fluxTermService.execute(blockId, cmd, shell, effectiveCwd);
       } else {
         // done / error / killed — re-run the same block in-place
         const sameId = reRunBlockInPlace(blockId);
         if (!sameId) return;
-        fluxTermService.execute(sameId, orig.command, orig.shell, orig.finalCwd ?? orig.cwd);
+        const effectiveCwd = cwdOverride ?? orig.finalCwd ?? orig.cwd;
+        fluxTermService.execute(sameId, orig.command, orig.shell, effectiveCwd);
       }
       fluxTermService.markDirty();
     },
@@ -286,7 +317,12 @@ export default function App() {
       if (!orig) return;
       const sameId = reRunBlockInPlace(blockId);
       if (!sameId) return;
-      fluxTermService.execute(sameId, orig.command, orig.shell, orig.finalCwd ?? orig.cwd);
+      fluxTermService.execute(
+        sameId,
+        orig.command,
+        orig.shell,
+        orig.finalCwd ?? orig.cwd,
+      );
       fluxTermService.markDirty();
     },
     [blocks, reRunBlockInPlace],
@@ -365,8 +401,8 @@ export default function App() {
                 onShellChange={() => {
                   /* handled locally in Block via localShell */
                 }}
-                onSubmit={(cmd, shell) =>
-                  handleBlockSubmit(block.id, cmd, shell)
+                onSubmit={(cmd, shell, cwdOverride) =>
+                  handleBlockSubmit(block.id, cmd, shell, cwdOverride)
                 }
                 onDelete={() => {
                   deleteBlock(block.id);
@@ -376,6 +412,11 @@ export default function App() {
                 onClearOutput={() => handleClearOutput(block.id)}
                 onAddAfter={() => handleAddAfter(block.id, doc.id)}
                 onKill={() => fluxTermService.killBlock(block.id)}
+                onCwdChange={(newCwd) => {
+                  // For idle blocks, persist the CWD into the store so it survives re-renders.
+                  // For completed blocks it is kept in Block's localCwd state only.
+                  if (block.status === "idle") updateBlockCwd(block.id, newCwd);
+                }}
               />
             ))}
 
@@ -388,7 +429,9 @@ export default function App() {
               onGhostCommandChange={(v) =>
                 setGhostCommands((prev) => ({ ...prev, [doc.id]: v }))
               }
-              onSubmit={(cmd, shell) => handleGhostSubmit(doc.id, cmd, shell)}
+              onSubmit={(cmd, shell, cwdOverride) =>
+                handleGhostSubmit(doc.id, cmd, shell, cwdOverride)
+              }
               context={baseContext}
               availableShells={shells}
               onShellChange={() => {
@@ -398,6 +441,9 @@ export default function App() {
                 const last = docBlocks[docBlocks.length - 1];
                 if (last) handleAddAfter(last.id, doc.id);
               }}
+              onCwdChange={(newCwd) =>
+                setGhostCwds((prev) => ({ ...prev, [doc.id]: newCwd }))
+              }
             />
           </BlockDocument>
         );
@@ -417,13 +463,16 @@ export default function App() {
           isGhost
           ghostCommand={ghostDocCommand}
           onGhostCommandChange={setGhostDocCommand}
-          onSubmit={(cmd, shell) => handleGhostDocSubmit(cmd, shell)}
+          onSubmit={(cmd, shell, cwdOverride) =>
+            handleGhostDocSubmit(cmd, shell, cwdOverride)
+          }
           context={baseContext}
           availableShells={shells}
           onShellChange={() => {
             /* handled locally in Block via localShell */
           }}
           onAddAfter={() => {}}
+          onCwdChange={(newCwd) => setGhostDocCwd(newCwd)}
         />
       </BlockDocument>
     </div>
