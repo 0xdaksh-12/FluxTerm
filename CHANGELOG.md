@@ -31,6 +31,19 @@ This format follows rigorous open-source repository management standards.
 
 ### Bug Fixes
 
+- **webview** [Bug 1]: `handleBlockSubmit` was sending `orig.command` (frozen at first run) to the engine instead of `cmd` (the user's current textarea text) for done/error/killed block re-submissions. Edited commands now execute correctly.
+- **webview** [Bug 2]: Re-run moved blocks to the bottom of the document because `reRunBlockInPlace` bumped `block.seq` to the highest value and App.tsx sorts by `seq`. Fixed by separating the sequence guard counter (`blockSeq`/`lastRunSeq`) from the visual ordering field (`seq`). `block.seq` is no longer mutated on re-run.
+- **webview** [Bug 3]: `promoteIdleBlock` never injected the datetime separator or updated `createdAt`, so promoted idle blocks showed no timestamp header. Fixed to match `createBlock` behaviour.
+- **webview** [Bug 4]: Ghost blocks inherited `runtimeContext.cwd` (global, cross-document) instead of the last `finalCwd` of the same document. Fixed by computing `lastDocCwd` per-document from `docBlocks`.
+- **webview** [Bug 6]: Search match count included hidden/cleared output lines. Fixed to count only `visibleOutput` (sliced at `clearedAt`).
+- **webview** [Bug 7]: "Copy Output" copied all output including pre-clear lines. Fixed to copy only visible lines.
+- **webview** [Bug 8]: `OutputArea` post-clear header was always shown, then blindly hid the first separator — which could be the re-run's own run timestamp. Fixed: post-clear header is only shown when `rows[0]` is not already a separator.
+- **webview** [Bug 9]: Context menu "Re-run" was always enabled — clicking it on a running block corrupted state. Fixed by adding `disabled={block.status === "running"}` and a guard in `reRunBlockInPlace`.
+- **webview** [Bug 10]: `spliceBlockAfter` assigned `seq = blockSeq + 1` causing the new idle block to sort to the bottom. Fixed by: (1) removing the `sort((a,b) => a.seq - b.seq)` in App.tsx — array order is canonical; (2) assigning a fractional seq between source and next block in `spliceBlockAfter`.
+- **extension** [Bug 11]: `ExecutionEngine.dispose()` called `registry.clear()` synchronously before async `taskkill` callbacks fired, causing `finalize()` to no-op and leaving processes alive. Removed the synchronous clear — each process removes its own entry via the `close` event.
+- **webview** [Bug 12]: Dead `"update"` message branch in `useFluxTermDocument` removed — the extension never sends this message type.
+- **webview** [Bug 13]: `baseContext.shell` was hardcoded `null`. Now inherits from `runtimeContext.shell` so ghost blocks can default to the last-used shell.
+
 - **webview**: Fixed `BlockDocument` name not persisting — `onGroupNameChange` is now wired to `updateDocument` in `App.tsx` and the `documents` array is included in every `saveResponse`.
 - **webview**: Fixed non-scrollable webview — removed the `h-screen` + `overflow-y-auto` fixed-height container. The page now grows naturally with content; `html` and `body` have `overflow-y: auto` and `height: 100%` in `styles.css`.
 - **webview**: Capped `OutputArea` height at `300px` with `overflow-y: auto` so long command outputs don't push the entire layout off-screen.

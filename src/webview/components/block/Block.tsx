@@ -189,16 +189,28 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
       setShowShellMenu(true);
     };
 
+    // BUG 6 FIX: compute matches only on visible (non-cleared) output lines.
+    const visibleOutput = block
+      ? block.clearedAt !== null
+        ? block.output.slice(block.clearedAt)
+        : block.output
+      : [];
+
     const searchMatchCount = searchQuery
-      ? (block?.output ?? []).filter((l) =>
+      ? visibleOutput.filter((l) =>
           l.text.toLowerCase().includes(searchQuery.toLowerCase()),
         ).length
       : 0;
 
+    // BUG 7 FIX: copy only visible (non-cleared) output lines.
     const handleCopyOutput = useCallback(() => {
       if (!block) return;
+      const toCopy =
+        block.clearedAt !== null
+          ? block.output.slice(block.clearedAt)
+          : block.output;
       navigator.clipboard
-        .writeText(block.output.map((l) => l.text).join("\n"))
+        .writeText(toCopy.map((l) => l.text).join("\n"))
         .catch(() => {});
     }, [block]);
 

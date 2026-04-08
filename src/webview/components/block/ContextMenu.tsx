@@ -130,7 +130,12 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         }
         onClick={onClearOutput ?? (() => {})}
       />
-      <MenuItem icon="codicon-refresh" label="Re-run" onClick={onReRun} />
+      <MenuItem
+        icon="codicon-refresh"
+        label="Re-run"
+        disabled={block.status === "running"}
+        onClick={onReRun}
+      />
       <MenuDivider />
       <MenuItem
         icon="codicon-circle-slash"

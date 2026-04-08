@@ -145,12 +145,13 @@ export default function App() {
     window.document.head.appendChild(style);
   }
 
-  // Base context (cwd/branch from runtime — NO global shell).
-  // Each block has its own shell tracked locally in Block.tsx.
+  // Base context (cwd/branch/shell from runtime).
+  // shell is inherited from runtimeContext so ghost blocks can default to it.
+  // Each real block still tracks its own shell locally in Block.tsx.
   const baseContext: FluxTermContext = {
     cwd: runtimeContext.cwd || docContext.cwd || "",
     branch: runtimeContext.branch ?? docContext.branch ?? null,
-    shell: null,
+    shell: runtimeContext.shell ?? null,
     connection: runtimeContext.connection ?? "local",
   };
 
@@ -254,7 +255,7 @@ export default function App() {
    * Submit from any non-running store block.
    * `shell` is the block's local shell (may have been changed by the user).
    * `cwdOverride` is set when the user edited the CWD via CwdEditor before submitting.
-   * Idle: promote in-place. Done/error/killed: clone a fresh block.
+   * Idle: promote in-place. Done/error/killed: re-run in-place with the NEW cmd.
    */
   const handleBlockSubmit = useCallback(
     (
@@ -278,11 +279,13 @@ export default function App() {
         );
         fluxTermService.execute(blockId, cmd, shell, effectiveCwd);
       } else {
-        // done / error / killed — re-run the same block in-place
+        // done / error / killed — re-run the same block in-place.
+        // BUG 1 FIX: use `cmd` (the user's current textarea text), not
+        // `orig.command` (the command frozen in the store from the last run).
         const sameId = reRunBlockInPlace(blockId);
         if (!sameId) return;
         const effectiveCwd = cwdOverride ?? orig.finalCwd ?? orig.cwd;
-        fluxTermService.execute(sameId, orig.command, orig.shell, effectiveCwd);
+        fluxTermService.execute(sameId, cmd, shell, effectiveCwd);
       }
       fluxTermService.markDirty();
     },
@@ -356,7 +359,10 @@ export default function App() {
   }, [handleGhostDocSubmit, blocks, shells]);
 
   const safeBlocks = Array.isArray(blocks) ? blocks : [];
-  const sortedBlocks = [...safeBlocks].sort((a, b) => a.seq - b.seq);
+  // BUG 10 FIX: Do NOT sort by seq — array insertion order from the store IS
+  // the canonical visual order. spliceBlockAfter uses array.splice() to place
+  // blocks correctly; re-sorting undoes that.
+  const orderedBlocks = safeBlocks;
 
   return (
     <div
@@ -372,11 +378,17 @@ export default function App() {
     >
       {/* Real documents */}
       {documents.map((doc) => {
-        const docBlocks = sortedBlocks.filter(
+        const docBlocks = orderedBlocks.filter(
           (b) => (b.documentId ?? "default") === doc.id,
         );
         const isAnyRunning = docBlocks.some((b) => b.status === "running");
         const ghostCmd = ghostCommands[doc.id] ?? "";
+        // BUG 4 FIX: ghost block CWD inherits from the last completed block in
+        // THIS document — not from the global runtimeContext (which could be
+        // contaminated by completions from other documents).
+        const lastDocCwd =
+          docBlocks.filter((b) => b.finalCwd).at(-1)?.finalCwd ??
+          baseContext.cwd;
 
         return (
           <BlockDocument
@@ -432,7 +444,7 @@ export default function App() {
               onSubmit={(cmd, shell, cwdOverride) =>
                 handleGhostSubmit(doc.id, cmd, shell, cwdOverride)
               }
-              context={baseContext}
+              context={{ ...baseContext, cwd: lastDocCwd }}
               availableShells={shells}
               onShellChange={() => {
                 /* handled locally in Block via localShell */

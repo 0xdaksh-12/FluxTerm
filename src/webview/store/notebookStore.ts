@@ -23,7 +23,11 @@ import { generateId } from "../../utils/helper";
 interface NotebookState {
   blocks: FluxTermBlock[];
   runtimeContext: FluxTermContext;
-  /** Monotonically increasing counter; next block gets `blockSeq + 1`. */
+  /**
+   * Monotonically increasing counter used ONLY as a sequence guard for
+   * `completeBlock`. Never used for visual ordering — block array order is
+   * canonical for rendering.
+   */
   blockSeq: number;
 }
 
@@ -225,10 +229,11 @@ export function useNotebook(
   /**
    * Mark a block as complete and update the global runtimeContext.
    *
-   * **Sequence guard**: runtimeContext is updated only if this block's `seq`
-   * is >= the seq of whichever block last wrote to the context. This prevents
-   * a slow earlier block (lower seq) from overwriting the context after a
-   * faster later block (higher seq) has already set a newer path.
+   * **Sequence guard**: runtimeContext is updated only if this block's
+   * `lastRunSeq` (set by reRunBlockInPlace) or `seq` (set at creation) is
+   * >= the seq of whichever block last wrote to the context. This prevents
+   * a slow earlier execution from overwriting the context set by a later one.
+   * Using `lastRunSeq` decouples the guard from the visual ordering `seq`.
    */
   const completeBlock = useCallback(
     (
@@ -252,11 +257,14 @@ export function useNotebook(
           b.finalBranch = finalBranch;
 
           // Only advance the runtime context for non-killed completions
-          // that provide a valid string cwd, and whose seq is not stale.
+          // that provide a valid cwd, and whose run is not stale.
           if (status !== "killed" && typeof finalCwd === "string") {
+            // Prefer lastRunSeq (set by reRunBlockInPlace) over seq so the
+            // sequence guard works correctly after in-place re-runs.
+            const blockRunSeq = (b as any).lastRunSeq ?? b.seq;
             const contextSourceSeq =
               (draft.runtimeContext as any).__sourceSeq ?? 0;
-            if (b.seq >= contextSourceSeq) {
+            if (blockRunSeq >= contextSourceSeq) {
               draft.runtimeContext = {
                 ...draft.runtimeContext,
                 cwd: finalCwd,
@@ -265,8 +273,7 @@ export function useNotebook(
                     ? finalBranch
                     : draft.runtimeContext.branch,
               };
-              // Store the source seq on the context object for future guards.
-              (draft.runtimeContext as any).__sourceSeq = b.seq;
+              (draft.runtimeContext as any).__sourceSeq = blockRunSeq;
             }
           }
         });
@@ -304,31 +311,35 @@ export function useNotebook(
   /**
    * Re-run a completed block **in-place** (no cloning).
    *
-   * 1. Appends a datetime separator to the existing output so the old logs
-   *    are preserved above it.
-   * 2. Resets status → "running" and clears completion metadata.
-   * 3. Bumps seq so the sequence guard in `completeBlock` remains valid.
-   * 4. Returns the same block id — caller dispatches `fluxTermService.execute`
-   *    with this id.
-   * Returns `null` if the block is not found.
+   * 1. Guards against re-running a block that is already running.
+   * 2. Appends a datetime separator so old logs are preserved above it.
+   * 3. Resets status → "running" and clears completion metadata.
+   * 4. Bumps `blockSeq` (the sequence guard counter) WITHOUT touching
+   *    `block.seq` — so the block stays in its visual position after re-run.
+   *    The new `blockSeq` value is stored on the block as `lastRunSeq` for
+   *    the `completeBlock` sequence guard to use.
+   * Returns `null` if the block is not found or is already running.
    */
   const reRunBlockInPlace = useCallback((blockId: string): string | null => {
     let found = false;
     setState((prev) =>
       produce(prev, (draft) => {
         const block = draft.blocks.find((b) => b.id === blockId);
-        if (!block) {
+        // Guard: never re-run a block that is already running
+        if (!block || block.status === "running") {
           return;
         }
         found = true;
-        const seq = draft.blockSeq + 1;
-        draft.blockSeq = seq;
+        // Advance the sequence guard counter but do NOT change block.seq.
+        // block.seq controls visual ordering; blockSeq guards stale completions.
+        const runSeq = draft.blockSeq + 1;
+        draft.blockSeq = runSeq;
+        (block as any).lastRunSeq = runSeq;
         // Preserve old output, append a datetime separator before new output.
         block.output.push({
           type: "separator",
           text: new Date().toISOString(),
         });
-        block.seq = seq;
         block.status = "running";
         block.exitCode = null;
         block.finalCwd = null;
@@ -360,8 +371,16 @@ export function useNotebook(
 
   /**
    * Insert a new idle block immediately after `afterBlockId`.
-   * The seq is set to `blockSeq + 1` so it sorts after all existing blocks;
-   * the block array is spliced at the correct index to maintain sort stability.
+   *
+   * Visual ordering is determined by **array position** — the block is spliced
+   * at `idx + 1` which is the canonical render order. `seq` is intentionally
+   * NOT bumped here so the block doesn't sort to the end when App.tsx sorts by
+   * seq. Instead we assign a fractional seq between the source block and the
+   * next one so it always lands in the right slot if sorting ever resumes.
+   *
+   * Note: App.tsx currently removes the sort entirely (Bug 10 fix) and relies
+   * on array order directly, so the seq value here is only used as a guard
+   * baseline for this new block's first run.
    */
   const spliceBlockAfter = useCallback(
     (
@@ -376,8 +395,14 @@ export function useNotebook(
         produce(prev, (draft) => {
           const idx = draft.blocks.findIndex((b) => b.id === afterBlockId);
           const insertAt = idx === -1 ? draft.blocks.length : idx + 1;
-          const seq = draft.blockSeq + 1;
-          draft.blockSeq = seq;
+          // Assign a seq that places this block between the source and the
+          // next existing block, so the sequence guard works correctly on first run.
+          const sourceSeq = idx !== -1 ? draft.blocks[idx].seq : draft.blockSeq;
+          const nextSeq =
+            insertAt < draft.blocks.length
+              ? draft.blocks[insertAt].seq
+              : draft.blockSeq + 2;
+          const seq = (sourceSeq + nextSeq) / 2;
           draft.blocks.splice(insertAt, 0, {
             id,
             seq,
@@ -405,6 +430,8 @@ export function useNotebook(
   /**
    * Atomically promote an idle block to running state.
    * Freezes command, shell, cwd, branch into the block and sets status = "running".
+   * Also injects the datetime separator and sets `createdAt` to now, matching
+   * the behaviour of `createBlock` for consistent output history headers.
    */
   const promoteIdleBlock = useCallback(
     (
@@ -423,6 +450,10 @@ export function useNotebook(
             block.cwd = cwd;
             block.branch = branch;
             block.status = "running";
+            // Inject the datetime separator so promoted blocks have the same
+            // output header structure as blocks created via createBlock.
+            block.output = [{ type: "separator", text: new Date().toISOString() }];
+            block.createdAt = Date.now();
           }
         }),
       );

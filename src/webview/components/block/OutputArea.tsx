@@ -233,19 +233,19 @@ export const OutputArea: React.FC<{
         overflowX: "hidden",
       }}
     >
-      {/* Post-clear datetime header: shown before first visible line when clearedAt is set */}
-      {clearedAt !== null && clearedAtTime !== null && (
-        <SeparatorRow text={String(clearedAtTime)} isFirst={true} />
-      )}
+      {/* Post-clear datetime header: shown only when there is no separator
+          already at the top of visible output. If visibleLines[0] is itself
+          a separator (the re-run timestamp) we show that instead \u2014 it carries
+          more precise information than the clear time. */}
+      {clearedAt !== null &&
+        clearedAtTime !== null &&
+        rows[0]?.line.type !== "separator" && (
+          <SeparatorRow text={String(clearedAtTime)} isFirst={true} />
+        )}
 
       {rows.map((row, i) => {
         // Separator lines are rendered as datetime dividers
         if (row.line.type === "separator") {
-          // Skip the very first separator if a post-clear header was already shown
-          // (i.e. this separator is the one injected right at clearedAt boundary)
-          if (clearedAt !== null && clearedAtTime !== null && i === 0) {
-            return null;
-          }
           return <SeparatorRow key={i} text={row.line.text} isFirst={i === 0} />;
         }
 

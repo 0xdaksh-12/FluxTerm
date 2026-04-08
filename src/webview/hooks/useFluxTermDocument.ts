@@ -55,15 +55,9 @@ export const useFluxTermDocument = (): UseFluxTermDocumentReturn => {
         // doc may include saved blocks/runtimeContext from a previous explicit save
         setDocument(message.document ?? {});
         setContext(message.context ?? DEFAULT_CONTEXT);
-      } else if (message.type === "update") {
-        // Extension echoes back after writing — keep local state in sync
-        if (message.document) {
-          setDocument(message.document);
-        }
-        if (message.context) {
-          setContext(message.context);
-        }
       }
+      // Note: the extension does NOT send an "update" message to the webview.
+      // Document state is managed locally and persisted via explicit save only.
     });
 
     // Kick-start: ask the extension for the initial state and live context.

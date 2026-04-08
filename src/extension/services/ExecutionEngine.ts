@@ -240,12 +240,18 @@ export class ExecutionEngine {
   /**
    * Kill all running processes and clear the registry.
    * Called when the editor panel is disposed.
+   *
+   * BUG 11 FIX: Do NOT call registry.clear() synchronously here.
+   * killBlock() is async on Windows (spawns taskkill) — clearing the registry
+   * before the close events fire means finalize() finds nothing to clean up
+   * and processes can linger. Each process removes its own entry via the
+   * 'close' event handler in execute() → cleanupRegistry(id).
    */
   dispose(): void {
     for (const id of this.registry.keys()) {
       this.killBlock(id);
     }
-    this.registry.clear();
+    // Do NOT call this.registry.clear() — each process cleans up on close.
   }
 
   /**
