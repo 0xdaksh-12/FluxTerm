@@ -6,4 +6,3 @@ node_modules
 *.ftx
 .DS_Store
 storybook-static/
-design/
