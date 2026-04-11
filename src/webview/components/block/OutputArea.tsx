@@ -2,12 +2,10 @@ import React from "react";
 import Ansi from "ansi-to-react";
 import { FluxTermBlock, OutputLine } from "../../../types/MessageProtocol";
 
-// ─── Shared date formatter ────────────────────────────────────────────────────
-
+// Shared date formatter
 function formatSeparatorDate(isoOrMs: string | number): string {
   const d = typeof isoOrMs === "number" ? new Date(isoOrMs) : new Date(isoOrMs);
   if (isNaN(d.getTime())) return String(isoOrMs);
-  // e.g. "Tue Apr 8, 21:24:58"
   return d.toLocaleString(undefined, {
     weekday: "short",
     month: "short",
@@ -18,64 +16,6 @@ function formatSeparatorDate(isoOrMs: string | number): string {
     hour12: false,
   });
 }
-
-// ─── Separator row ────────────────────────────────────────────────────────────
-
-const SeparatorRow: React.FC<{ text: string; isFirst?: boolean }> = ({
-  text,
-  isFirst,
-}) => {
-  const label = formatSeparatorDate(text);
-  return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: "6px",
-        margin: isFirst ? "4px 0" : "18px 0 4px 0",
-        opacity: 0.55,
-        userSelect: "none",
-      }}
-    >
-      {/* Left rule */}
-      <div
-        style={{
-          flex: "0 0 12px",
-          height: "1px",
-          backgroundColor: "var(--vscode-descriptionForeground)",
-        }}
-      />
-      {/* Icon + label */}
-      <span
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "4px",
-          fontSize: "10px",
-          fontStyle: "italic",
-          color: "var(--vscode-descriptionForeground)",
-          whiteSpace: "nowrap",
-          fontFamily:
-            "var(--vscode-editor-font-family, var(--vscode-terminal-font-family, monospace))",
-        }}
-      >
-        <span
-          className="codicon codicon-history"
-          style={{ fontSize: "10px" }}
-        />
-        {label}
-      </span>
-      {/* Right rule */}
-      <div
-        style={{
-          flex: 1,
-          height: "1px",
-          backgroundColor: "var(--vscode-descriptionForeground)",
-        }}
-      />
-    </div>
-  );
-};
 
 // ─── Output line row ──────────────────────────────────────────────────────────
 
@@ -94,7 +34,7 @@ const OutputLineRow: React.FC<LineProps> = ({
   const color =
     line.type === "stderr"
       ? "var(--vscode-testing-iconFailed, var(--vscode-terminal-ansiRed, #f14c4c))"
-      : "var(--vscode-editor-foreground)";
+      : undefined;
 
   return (
     <div
@@ -124,7 +64,6 @@ const OutputLineRow: React.FC<LineProps> = ({
 
 // ─── Display row builder ──────────────────────────────────────────────────────
 
-// Build display rows — merge each stdin line onto the preceding output line.
 interface DisplayRow {
   line: OutputLine;
   inlineInput?: string;
@@ -132,11 +71,9 @@ interface DisplayRow {
 
 function buildDisplayRows(lines: OutputLine[]): DisplayRow[] {
   const rows: DisplayRow[] = [];
-
   for (const line of lines) {
     if (line.type === "stdin") {
       if (rows.length > 0) {
-        // Append to the last row's inlineInput (handles multiple inputs)
         const last = rows[rows.length - 1];
         rows[rows.length - 1] = {
           ...last,
@@ -146,15 +83,43 @@ function buildDisplayRows(lines: OutputLine[]): DisplayRow[] {
               : line.text,
         };
       } else {
-        // No preceding line — render as a standalone row using a dummy stdout line
         rows.push({ line: { type: "stdout", text: line.text } });
       }
     } else {
       rows.push({ line });
     }
   }
-
   return rows;
+}
+
+// ─── Run session group (separator + its output lines) ────────────────────────
+
+interface RunGroup {
+  /** ISO string / ms timestamp from the separator line */
+  separatorText: string;
+  rows: DisplayRow[];
+}
+
+/**
+ * Splits flat display rows into groups, one per separator.
+ * Lines before the first separator get their own group with an empty label
+ * (shouldn't happen in practice since every real block starts with one).
+ */
+function buildRunGroups(rows: DisplayRow[]): RunGroup[] {
+  const groups: RunGroup[] = [];
+  let current: RunGroup | null = null;
+
+  for (const row of rows) {
+    if (row.line.type === "separator") {
+      if (current) groups.push(current);
+      current = { separatorText: row.line.text, rows: [] };
+    } else {
+      if (!current) current = { separatorText: "", rows: [] };
+      current.rows.push(row);
+    }
+  }
+  if (current) groups.push(current);
+  return groups;
 }
 
 // ─── OutputArea ───────────────────────────────────────────────────────────────
@@ -165,7 +130,7 @@ export const OutputArea: React.FC<{
 }> = ({ block, searchQuery }) => {
   const { output, status, clearedAt, clearedAtTime } = block;
 
-  // Slice output to only the visible lines (after the last clear)
+  // Slice to only the visible lines (after the last clear)
   const visibleLines = clearedAt !== null ? output.slice(clearedAt) : output;
 
   // Empty states
@@ -210,57 +175,98 @@ export const OutputArea: React.FC<{
   }
 
   const lowerQuery = searchQuery.toLowerCase();
-  const rows = buildDisplayRows(visibleLines);
+  const allRows = buildDisplayRows(visibleLines);
+
+  // If the output was cleared and the first visible line is not a separator,
+  // prepend a synthetic separator using clearedAtTime so the group gets a label.
+  const rowsWithClearHeader: DisplayRow[] =
+    clearedAt !== null &&
+    clearedAtTime !== null &&
+    allRows[0]?.line.type !== "separator"
+      ? [
+          { line: { type: "separator", text: String(clearedAtTime) } },
+          ...allRows,
+        ]
+      : allRows;
+
+  const groups = buildRunGroups(rowsWithClearHeader);
 
   return (
     <div
       style={{
-        // marginTop: "8px",
-        // padding: "4px 8px",
         display: "flex",
         flexDirection: "column",
-        gap: "2px",
-        fontFamily:
-          "var(--vscode-terminal-font-family, --vscode-editor-font-family, 'Fira Code Nerd Font Mono', monospace)",
-        fontSize: "12px",
-        lineHeight: "1.5",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-all",
-        color:
-          "var(--vscode-terminal-foreground, var(--vscode-editor-foreground))",
-        maxHeight: "300px",
-        overflowY: "auto",
-        overflowX: "hidden",
+        gap: "0",
       }}
     >
-      {/* Post-clear datetime header: shown only when there is no separator
-          already at the top of visible output. If visibleLines[0] is itself
-          a separator (the re-run timestamp) we show that instead \u2014 it carries
-          more precise information than the clear time. */}
-      {clearedAt !== null &&
-        clearedAtTime !== null &&
-        rows[0]?.line.type !== "separator" && (
-          <SeparatorRow text={String(clearedAtTime)} isFirst={true} />
-        )}
-
-      {rows.map((row, i) => {
-        // Separator lines are rendered as datetime dividers
-        if (row.line.type === "separator") {
-          return <SeparatorRow key={i} text={row.line.text} isFirst={i === 0} />;
-        }
-
-        const highlighted =
-          lowerQuery !== "" &&
-          (row.line.text.toLowerCase().includes(lowerQuery) ||
-            (row.inlineInput?.toLowerCase().includes(lowerQuery) ?? false));
+      {groups.map((group, gi) => {
+        const label = group.separatorText
+          ? formatSeparatorDate(group.separatorText)
+          : null;
 
         return (
-          <OutputLineRow
-            key={i}
-            line={row.line}
-            inlineInput={row.inlineInput}
-            highlighted={highlighted}
-          />
+          <div key={gi}>
+            {/* Timestamp label */}
+            {label && (
+              <span
+                style={{
+                  display: "block",
+                  color: "var(--vscode-descriptionForeground)",
+                  fontSize: "10px",
+                  fontStyle: "italic",
+                  userSelect: "none",
+                  marginTop: gi === 0 ? "0" : "14px",
+                  marginBottom: "3px",
+                  fontFamily:
+                    "var(--vscode-editor-font-family, var(--vscode-terminal-font-family, monospace))",
+                }}
+              >
+                [{label}]
+              </span>
+            )}
+
+            {/* Output block */}
+            {group.rows.length > 0 && (
+              <div
+                style={{
+                  padding: "4px 8px 4px 10px",
+                  borderLeft:
+                    "2px solid var(--vscode-charts-blue, var(--vscode-button-background, #007fd4))",
+                  color:
+                    "var(--vscode-terminal-foreground, var(--vscode-editor-foreground))",
+                  fontFamily:
+                    "var(--vscode-terminal-font-family, var(--vscode-editor-font-family, monospace))",
+                  fontSize: "12px",
+                  lineHeight: "1.5",
+                  overflowX: "auto",
+                  whiteSpace: "pre",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "2px",
+                  borderTopLeftRadius: "2px",
+                  borderBottomLeftRadius: "2px",
+                  maxHeight: "300px",
+                  overflowY: "auto",
+                }}
+              >
+                {group.rows.map((row, ri) => {
+                  const highlighted =
+                    lowerQuery !== "" &&
+                    (row.line.text.toLowerCase().includes(lowerQuery) ||
+                      (row.inlineInput?.toLowerCase().includes(lowerQuery) ??
+                        false));
+                  return (
+                    <OutputLineRow
+                      key={ri}
+                      line={row.line}
+                      inlineInput={row.inlineInput}
+                      highlighted={highlighted}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </div>
         );
       })}
     </div>

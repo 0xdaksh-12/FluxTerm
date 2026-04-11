@@ -1,0 +1,34 @@
+[11:48:31.981] [INFO] storybook v10.3.4
+[11:48:32.742] [DEBUG] Getting package.json info for /home/daksh/Desktop/FUCK/FluxTerm/package.json...
+[11:48:34.300] [DEBUG] Serving static files from [36mdist[39m at [36m/[39m
+[11:48:34.304] [INFO] Starting...
+[11:48:34.721] [DEBUG] Starting preview..
+[11:48:34.780] [DEBUG] Using tsconfig paths for react-docgen
+[11:48:34.803] [WARN] 🚨 Unable to index ./src/webview/components/dummy/workspace.stories.tsx:
+  NoMetaError: CSF: missing default export /home/daksh/Desktop/FUCK/FluxTerm/src/webview/components/dummy/workspace.stories.tsx (line 1, col 0)
+
+More info: https://storybook.js.org/docs/writing-stories?ref=error#default-export
+    at CsfFile.parse (file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/_node-chunks/chunk-YQB7TYP2.js:456:13)
+    at Object.createIndex (file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/presets/common-preset.js:1814:154)
+    at async _StoryIndexGenerator.extractStories (file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6107:23)
+    at async file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6028:39
+    at async Promise.all (index 0)
+    at async Promise.all (index 0)
+    at async _StoryIndexGenerator.updateExtracted (file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6016:5)
+    at async _StoryIndexGenerator.ensureExtracted (file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6051:5)
+    at async _StoryIndexGenerator.initialize (file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6012:5)
+    at async file:///home/daksh/Desktop/FUCK/FluxTerm/node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/presets/common-preset.js:1855:10
+[11:48:34.821] [ERROR] Failed to build the preview
+[11:48:34.828] [ERROR] Error: Unable to index ./src/webview/components/dummy/workspace.stories.tsx
+    at _StoryIndexGenerator.getIndexAndStats (file://./node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6282:15)
+    at async _StoryIndexGenerator.getIndex (file://./node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:6271:13)
+    at async BasicMinimalPluginContext.config (file://./node_modules/.pnpm/@storybook+builder-vite@10.3.4_esbuild@0.27.4_rollup@4.60.0_storybook@10.3.4_@testing-l_eb6d9ac9d11e71bbac926485f907642e/node_modules/@storybook/builder-vite/dist/_node-chunks/chunk-2UAJDYWO.js:184:19)
+    at async runConfigHook (file://./node_modules/.pnpm/vite@8.0.3_@emnapi+core@1.9.2_@emnapi+runtime@1.9.2_@types+node@22.19.15_esbuild@0.27.4_jiti@2.6.1/node_modules/vite/dist/node/chunks/node.js:34603:15)
+    at async resolveConfig (file://./node_modules/.pnpm/vite@8.0.3_@emnapi+core@1.9.2_@emnapi+runtime@1.9.2_@types+node@22.19.15_esbuild@0.27.4_jiti@2.6.1/node_modules/vite/dist/node/chunks/node.js:34053:11)
+    at async _createServer (file://./node_modules/.pnpm/vite@8.0.3_@emnapi+core@1.9.2_@emnapi+runtime@1.9.2_@types+node@22.19.15_esbuild@0.27.4_jiti@2.6.1/node_modules/vite/dist/node/chunks/node.js:25917:65)
+    at async Module.start (file://./node_modules/.pnpm/@storybook+builder-vite@10.3.4_esbuild@0.27.4_rollup@4.60.0_storybook@10.3.4_@testing-l_eb6d9ac9d11e71bbac926485f907642e/node_modules/@storybook/builder-vite/dist/index.js:1557:17)
+    at async storybookDevServer (file://./node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:7503:83)
+    at async buildOrThrow (file://./node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:4508:12)
+    at async buildDevStandalone (file://./node_modules/.pnpm/storybook@10.3.4_@testing-library+dom@10.4.1_react-dom@19.2.4_react@19.2.4__react@19.2.4/node_modules/storybook/dist/core-server/index.js:8033:41)
+[11:48:34.850] [WARN] Broken build, fix the error above.
+You may need to refresh the browser.

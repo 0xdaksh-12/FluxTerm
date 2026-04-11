@@ -18,6 +18,14 @@ The architecture is split between three main components:
 
 ### Recent Fixes & Updates
 
+- **OutputArea Run-Session Grouping (`OutputArea.tsx`, `Block.tsx`)**
+
+  **What changed**: Each run's output is now visually grouped under a compact italic `[timestamp]` label with a blue left-border block, matching the workspace mock pattern. The old `SeparatorRow` full-width divider rule is removed.
+
+  **How**: `buildRunGroups` splits the flat `DisplayRow[]` at every `separator` line into `RunGroup[]` objects, each carrying a `separatorText` and its subsequent content rows. The outer `OutputArea` renders each group as a `<span>` label (`[Tue Apr 8, 21:24:58]`) followed by a bordered, scrollable `<div>` — identical to the workspace mock's output block style. The `maxHeight: 300px / overflowY: auto` cap moves from the outer container to each group's bordered block so long multi-run outputs scroll per session. The external `borderLeft` + `marginLeft` that `Block.tsx` previously applied to the whole output area are removed; the border is now drawn per group inside `OutputArea`.
+
+  **Files changed**: `src/webview/components/block/OutputArea.tsx` — rewrote render section; `src/webview/components/block/Block.tsx` — stripped `borderLeft`/`marginLeft`/`borderRadius` from the output wrapper div.
+
 - **"Run" Button — Live Command & CWD (`Block.tsx`, `App.tsx`, `ContextMenu.tsx`)**
 
   **What changed**: The toolbar "Re-run" button and context-menu "Re-run" item on completed blocks have been renamed to **"Run"**. More importantly, when clicked they now execute using the **live** textarea command and CWD editor value rather than the values frozen at last execution time.

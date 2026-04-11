@@ -654,14 +654,6 @@ export const Block = forwardRef<HTMLDivElement, BlockProps>(
               style={{
                 marginBottom: isDone || isError ? "4px" : 0,
                 padding: "4px 8px 4px 12px",
-                marginLeft: "12px",
-                borderLeft: isDone
-                  ? "2px solid var(--vscode-charts-blue, var(--vscode-button-background, #007fd4))"
-                  : isError
-                    ? "2px solid var(--vscode-testing-iconFailed, #f14c4c)"
-                    : "none",
-                borderTopLeftRadius: "2px",
-                borderBottomLeftRadius: "2px",
               }}
             >
               <OutputArea block={block} searchQuery={searchQuery} />

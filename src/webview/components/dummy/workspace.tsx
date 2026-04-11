@@ -377,40 +377,51 @@ const MockInputSection = ({
           </div>
         )}
         {status === "done" && hasOutput && (
-          <div
-            style={{
-              marginTop: "0",
-              marginBottom: "12px",
-              padding: "4px 8px 4px 12px",
-              marginLeft: "12px",
-              borderLeft:
-                "2px solid var(--vscode-charts-blue, var(--vscode-button-background, #007fd4))",
-              color:
-                "var(--vscode-terminal-foreground, var(--vscode-editor-foreground))",
-              fontFamily:
-                "var(--vscode-terminal-font-family, var(--vscode-editor-font-family, monospace))",
-              fontSize: "12px",
-              lineHeight: "1.5",
-              overflowX: "auto",
-              whiteSpace: "pre",
-              display: "flex",
-              flexDirection: "column",
-              gap: "2px",
-              borderTopLeftRadius: "2px",
-              borderBottomLeftRadius: "2px",
-            }}
-          >
-            {MOCK_LL_OUTPUT.map((line, i) => (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  backgroundColor: "transparent",
-                }}
-              >
-                <Ansi useClasses>{line}</Ansi>
-              </div>
-            ))}
+          <div>
+            <span
+              style={{
+                color: "var(--vscode-descriptionForeground)",
+                fontSize: "12px",
+                marginLeft: "12px",
+              }}
+            >
+              [11:57:56 PM]
+            </span>
+            <div
+              style={{
+                marginTop: "0",
+                marginBottom: "12px",
+                padding: "4px 8px 4px 12px",
+                marginLeft: "12px",
+                borderLeft:
+                  "2px solid var(--vscode-charts-blue, var(--vscode-button-background, #007fd4))",
+                color:
+                  "var(--vscode-terminal-foreground, var(--vscode-editor-foreground))",
+                fontFamily:
+                  "var(--vscode-terminal-font-family, var(--vscode-editor-font-family, monospace))",
+                fontSize: "12px",
+                lineHeight: "1.5",
+                overflowX: "auto",
+                whiteSpace: "pre",
+                display: "flex",
+                flexDirection: "column",
+                gap: "2px",
+                borderTopLeftRadius: "2px",
+                borderBottomLeftRadius: "2px",
+              }}
+            >
+              {MOCK_LL_OUTPUT.map((line, i) => (
+                <div
+                  key={i}
+                  style={{
+                    display: "flex",
+                    backgroundColor: "transparent",
+                  }}
+                >
+                  <Ansi useClasses>{line}</Ansi>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
